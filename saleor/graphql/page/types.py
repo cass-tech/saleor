@@ -96,6 +96,7 @@ class PageType(ModelObjectType[models.PageType]):
             return PageAttributesVisibleInStorefrontByPageTypeIdLoader(
                 info.context
             ).load(root.pk)
+        return PageAttributesAllByPageTypeIdLoader(info.context).load(root.pk)
 
     @staticmethod
     def resolve_available_attributes(
@@ -168,12 +169,12 @@ class Page(ModelObjectType[models.Page]):
         description="List of attributes assigned to this page.",
     )
     media_by_id = graphene.Field(
-        lambda: models.PageMedia,
+        lambda: PageMedia,
         id=graphene.Argument(graphene.ID, description="ID of a page media."),
         description="Get a single page media by ID.",
     )
     media = NonNullList(
-        lambda: models.PageMedia,
+        lambda: PageMedia,
         sort_by=graphene.Argument(
             PageMediaSortingInput, description=f"Sort media. {ADDED_IN_39}"
         ),
@@ -261,6 +262,7 @@ class Page(ModelObjectType[models.Page]):
         return MediaByPageIdLoader(info.context).load(root.id).then(sort_media)
 
 
+@federated_entity("id")
 class PageMedia(ModelObjectType[models.PageMedia]):
     id = graphene.GlobalID(
         required=True, description="The unique ID of the page media."
@@ -315,9 +317,12 @@ class PageMedia(ModelObjectType[models.PageMedia]):
         )
 
     @staticmethod
-    def __resolve_references(roots: list["PageMedia"], _info):
+    def __resolve_references(roots: list["PageMedia"], info):
+        database_connection_name = get_database_connection_name(info.context)
         return resolve_federation_references(
-            PageMedia, roots, models.PageMedia.objects
+            PageMedia,
+            roots,
+            models.PageMedia.objects.using(database_connection_name),
         )
 
     @staticmethod
