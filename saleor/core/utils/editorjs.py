@@ -81,7 +81,7 @@ def clean_image_item(blocks, block, plain_text_list, to_string, index):
             plain_text_list.append(strip_tags(file_url))
         else:
             file_url = clean_text_data_block(file_url)
-            blocks[index]["data"]["file"]["ulr"] = file_url
+            blocks[index]["data"]["file"]["url"] = file_url
     if caption:
         if to_string:
             plain_text_list.append(strip_tags(caption))
