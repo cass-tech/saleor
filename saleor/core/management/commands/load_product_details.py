@@ -9,8 +9,8 @@ from saleor.product.models import ProductType, Product, Category, ProductVariant
     ProductVariantChannelListing
 from saleor.tests.utils import dummy_editorjs
 
-from saleor.attribute.models import Attribute, AttributeValue
-from saleor.product.models import ProductChannelListing, Collection
+from saleor.attribute.models import Attribute, AttributeValue, AssignedProductAttributeValue
+from saleor.product.models import ProductChannelListing
 
 
 class Command(BaseCommand):
@@ -61,7 +61,14 @@ class Command(BaseCommand):
         product_type = ProductType.objects.get(slug="perfume")
         default_channel = Channel.objects.get(slug="default-channel")
         perfume_category = Category.objects.get(slug='perfume')
-        scent_attribute = Attribute.objects.get(slug="scent")
+        top_attribute = Attribute.objects.get(slug="top-note")
+        mid_attribute = Attribute.objects.get(slug="mid-note")
+        base_attribute = Attribute.objects.get(slug="base-note")
+        notes = {
+            "top": top_attribute, 
+            "middle": mid_attribute,
+            "base": base_attribute
+            }
         category, _ = Category.objects.update_or_create(name=category_name,
                                                      parent=perfume_category)
         for product in products:
@@ -75,11 +82,16 @@ class Command(BaseCommand):
                 search_document=f"{product['name']}{product['description']}",
             )
             for note, scents in product["notes"].items():
+                note_attribute = notes[note]
                 for scent in scents:
                     attribute_value, _ = AttributeValue.objects.update_or_create(
-                        attribute=scent_attribute, slug=slugify(scent))
+                        attribute=note_attribute, slug=slugify(scent))
                     attribute_value.name = scent.strip()
                     attribute_value.save()
+                    product_attribute_value, _ = AssignedProductAttributeValue.objects.update_or_create(
+                        value=attribute_value,
+                        product=new_product
+                    )
             product_listing, _ = ProductChannelListing.objects.update_or_create(
                 product=new_product,
                 channel=default_channel,
