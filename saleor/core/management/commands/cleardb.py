@@ -15,7 +15,7 @@ from ....checkout.models import Checkout
 from ....discount.models import Promotion, Voucher
 from ....giftcard.models import GiftCard
 from ....order.models import Order
-from ....page.models import Page, PageType
+from ....page.models import Page, PageType, PageMedia
 from ....payment.models import Payment, Transaction, TransactionItem
 from ....product.models import Category, Collection, Product, ProductType
 from ....shipping.models import ShippingMethod, ShippingZone
@@ -90,6 +90,9 @@ class Command(BaseCommand):
 
         self.stdout.write("Removed warehouses")
         Warehouse.objects.all().delete()
+
+        PageMedia.objects.all().delete()
+        self.stdout.write("Removed page media")
 
         Page.objects.all().delete()
         self.stdout.write("Removed pages")
