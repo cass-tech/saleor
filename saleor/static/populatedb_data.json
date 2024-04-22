@@ -120,10 +120,10 @@
       "private_metadata": {},
       "metadata": {},
       "external_reference": null,
-      "slug": "scent",
-      "name": "Scent",
+      "slug": "top-note",
+      "name": "Top Notes",
       "type": "product-type",
-      "input_type": "dropdown",
+      "input_type": "multiselect",
       "entity_type": null,
       "unit": null,
       "value_required": true,
@@ -134,6 +134,76 @@
       "storefront_search_position": 0,
       "available_in_grid": true,
       "max_sort_order": 2
+    }
+  },
+  {
+    "model": "attribute.attribute",
+    "pk": 5,
+    "fields": {
+      "private_metadata": {},
+      "metadata": {},
+      "external_reference": null,
+      "slug": "mid-note",
+      "name": "Middle Notes",
+      "type": "product-type",
+      "input_type": "multiselect",
+      "entity_type": null,
+      "unit": null,
+      "value_required": true,
+      "is_variant_only": false,
+      "visible_in_storefront": true,
+      "filterable_in_storefront": true,
+      "filterable_in_dashboard": true,
+      "storefront_search_position": 0,
+      "available_in_grid": true,
+      "max_sort_order": 2
+    }
+  },
+  {
+    "model": "attribute.attribute",
+    "pk": 6,
+    "fields": {
+      "private_metadata": {},
+      "metadata": {},
+      "external_reference": null,
+      "slug": "base-note",
+      "name": "Base Notes",
+      "type": "product-type",
+      "input_type": "multiselect",
+      "entity_type": null,
+      "unit": null,
+      "value_required": true,
+      "is_variant_only": false,
+      "visible_in_storefront": true,
+      "filterable_in_storefront": true,
+      "filterable_in_dashboard": true,
+      "storefront_search_position": 0,
+      "available_in_grid": true,
+      "max_sort_order": 2
+    }
+  },
+  {
+    "model": "attribute.attributeproduct",
+    "pk": 1,
+    "fields": {
+      "product_type_id": 4,
+      "attribute_id": 4
+    }
+  },
+  {
+    "model": "attribute.attributeproduct",
+    "pk": 2,
+    "fields": {
+      "product_type_id": 4,
+      "attribute_id": 5
+    }
+  },
+  {
+    "model": "attribute.attributeproduct",
+    "pk": 3,
+    "fields": {
+      "product_type_id": 4,
+      "attribute_id": 6
     }
   },
   {
