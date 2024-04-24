@@ -9,7 +9,7 @@ from saleor.attribute.models import Attribute, AttributeValue, \
     AssignedProductAttributeValue
 from saleor.channel.models import Channel
 from saleor.product.models import ProductType, Category, Product, \
-    ProductChannelListing, ProductVariant, \
+    ProductChannelListing, ProductVariant, CollectionChannelListing, \
     ProductVariantChannelListing, Collection, CollectionProduct
 from saleor.tests.utils import dummy_editorjs
 from saleor.warehouse.models import Stock, Warehouse
@@ -87,6 +87,11 @@ class Command(BaseCommand):
             new_collection, _ = Collection.objects.update_or_create(
                 name=collection,
                 slug=slugify(collection)
+            )
+            collection_listing, _ = CollectionChannelListing.objects.update_or_create(
+                collection=new_collection,
+                channel=default_channel,
+                is_published=True
             )
             for product in products:
                 new_product, _ = Product.objects.update_or_create(
