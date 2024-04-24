@@ -1,0 +1,142 @@
+[
+  {
+    "model": "menu.menuitem",
+    "pk": 1,
+    "fields": {
+      "sort_order": 1,
+      "private_metadata": {},
+      "metadata": {},
+      "menu": 1,
+      "name": "MENS OUD ELEGANTE RANGE",
+      "parent": null,
+      "url": null,
+      "category": null,
+      "collection": 7,
+      "page": null,
+      "lft": 1,
+      "rght": 2,
+      "tree_id": 64,
+      "level": 0
+    }
+  },
+  {
+    "model": "menu.menuitem",
+    "pk": 2,
+    "fields": {
+      "sort_order": 2,
+      "private_metadata": {},
+      "metadata": {},
+      "menu": 1,
+      "name": "UNISEX OUD  ELEGANTE RANGE",
+      "parent": null,
+      "url": null,
+      "category": null,
+      "collection": 8,
+      "page": null,
+      "lft": 1,
+      "rght": 2,
+      "tree_id": 63,
+      "level": 0
+    }
+  },
+  {
+    "model": "menu.menuitem",
+    "pk": 3,
+    "fields": {
+      "sort_order": 3,
+      "private_metadata": {},
+      "metadata": {},
+      "menu": 1,
+      "name": "LADIES OUD ELEGANTE RANGE",
+      "parent": null,
+      "url": null,
+      "category": null,
+      "collection": 4,
+      "page": null,
+      "lft": 1,
+      "rght": 2,
+      "tree_id": 65,
+      "level": 0
+    }
+  },
+  {
+    "model": "menu.menuitem",
+    "pk": 4,
+    "fields": {
+      "sort_order": 4,
+      "private_metadata": {},
+      "metadata": {},
+      "menu": 1,
+      "name": "MENS OIL BASED PERFUMES  CLASSIC RANGE",
+      "parent": null,
+      "url": null,
+      "category": null,
+      "collection": 8,
+      "page": null,
+      "lft": 1,
+      "rght": 2,
+      "tree_id": 67,
+      "level": 0
+    }
+  },
+  {
+    "model": "menu.menuitem",
+    "pk": 5,
+    "fields": {
+      "sort_order": 5,
+      "private_metadata": {},
+      "metadata": {},
+      "menu": 1,
+      "name": "LADIES OIL BASED PERFUMES  CLASSIC RANGE",
+      "parent": null,
+      "url": null,
+      "category": null,
+      "collection": 8,
+      "page": null,
+      "lft": 1,
+      "rght": 2,
+      "tree_id": 66,
+      "level": 0
+    }
+  },
+  {
+    "model": "menu.menuitem",
+    "pk": 6,
+    "fields": {
+      "sort_order": 1,
+      "private_metadata": {},
+      "metadata": {},
+      "menu": 2,
+      "name": "Caspian King",
+      "parent": null,
+      "url": "/",
+      "category": null,
+      "collection": null,
+      "page": null,
+      "lft": 1,
+      "rght": 8,
+      "tree_id": 55,
+      "level": 0
+    }
+  },
+  {
+    "model": "menu.menuitem",
+    "pk": 7,
+    "fields": {
+      "sort_order": 2,
+      "private_metadata": {},
+      "metadata": {},
+      "menu": 2,
+      "name": "about",
+      "parent": 6,
+      "url": null,
+      "category": null,
+      "collection": null,
+      "page": 2,
+      "lft": 4,
+      "rght": 5,
+      "tree_id": 55,
+      "level": 1
+    }
+  }
+]

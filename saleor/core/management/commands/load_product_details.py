@@ -1,4 +1,5 @@
 import os
+import datetime
 import pandas as pd
 
 from django.core.management import BaseCommand, call_command
@@ -7,9 +8,11 @@ from django.utils.text import slugify
 from saleor.attribute.models import Attribute, AttributeValue, \
     AssignedProductAttributeValue
 from saleor.channel.models import Channel
-from saleor.product.models import ProductType, Category, Product, ProductChannelListing, \
-    ProductVariant, ProductVariantChannelListing, Collection, CollectionProduct
+from saleor.product.models import ProductType, Category, Product, \
+    ProductChannelListing, ProductVariant, \
+    ProductVariantChannelListing, Collection, CollectionProduct
 from saleor.tests.utils import dummy_editorjs
+from saleor.warehouse.models import Stock, Warehouse
 
 
 class Command(BaseCommand):
@@ -72,6 +75,7 @@ class Command(BaseCommand):
         top_attribute = Attribute.objects.get(slug="top-note")
         mid_attribute = Attribute.objects.get(slug="mid-note")
         base_attribute = Attribute.objects.get(slug="base-note")
+        cpt_warehouse = Warehouse.objects.get(id="921e9005-0e64-4e9d-9bd0-438265b3f6d7")
         notes = {
             "top": top_attribute,
             "middle": mid_attribute,
@@ -112,13 +116,22 @@ class Command(BaseCommand):
                 product_listing, _ = ProductChannelListing.objects.update_or_create(
                     product=new_product,
                     channel=default_channel,
-                    currency='ZAR'
+                    currency='ZAR',
+                    is_published=True,
+                    published_at=datetime.datetime.now(tz=datetime.timezone.utc),
+                    visible_in_listings=True,
+                    available_for_purchase_at=datetime.datetime.now(tz=datetime.timezone.utc)
                 )
                 for variant in product['variants']:
                     product_variant, _ = ProductVariant.objects.update_or_create(
                         product=new_product,
                         name=variant['name'],
                         sku=f"{variant['name']} {variant['sku']}"
+                    )
+                    stock, _ = Stock.objects.update_or_create(
+                        product_variant=product_variant,
+                        warehouse=cpt_warehouse,
+                        quantity=5
                     )
                     variant_listing, _ = ProductVariantChannelListing.objects.update_or_create(
                         variant=product_variant,
@@ -128,3 +141,4 @@ class Command(BaseCommand):
                         discounted_price_amount=variant['price'],
                         cost_price_amount=0.6 * float(variant['price'])
                     )
+        call_command('loaddata', '/app/saleor/static/menuitem.json')
