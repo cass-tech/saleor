@@ -49,6 +49,109 @@
     }
   },
   {
+    "model": "page.pagetype",
+    "pk": 1,
+    "fields": {
+      "name": "Simple Page",
+      "slug": "simple-page",
+      "private_metadata": {},
+      "metadata": {}
+    }
+  },
+  {
+    "model": "page.page",
+    "pk": 1,
+    "fields": {
+      "published_at": "2024-04-24T00:00:19.001Z",
+      "is_published": true,
+      "private_metadata": {},
+      "metadata": {},
+      "seo_title": "",
+      "seo_description": "",
+      "slug": "home",
+      "title": "Welcome",
+      "page_type_id": 1,
+      "content": {
+        "time": 1713961363657,
+        "blocks": [
+          {
+            "id": "xb6vfvNDWU",
+            "data":
+            {
+              "file":
+              {
+                "url": "https://saleor-minio-nginx.fly.dev/saleor/pages/CK_LP_IMAGES_101__51eb3f14.png?AWSAccessKeyId=saleoradmin&amp;Signature=s%2BDEWT8h5lVN9yZzDHEAhhspkAk%3D&amp;Expires=1713964961"
+              },
+              "caption": "",
+              "stretched": false,
+              "withBorder": false,
+              "withBackground": false
+            }, "type": "image"
+          }
+        ],
+        "version": "2.24.3"
+      },
+      "created_at": "2024-04-24T12:22:19.001Z"
+    }
+  },
+  {
+    "model": "page.page",
+    "pk": 2,
+    "fields": {
+      "published_at": "2024-04-24T14:16:19.001Z",
+      "is_published": true,
+      "private_metadata": {},
+      "metadata": {},
+      "seo_title": "",
+      "seo_description": "",
+      "slug": "about",
+      "title": "About",
+      "page_type_id": 1,
+      "content": {
+        "time": 1713968178356,
+        "blocks": [
+          {
+            "id": "GRwguv74n4",
+            "data": {
+              "text": "<b>CASPIAN KING PERFUMES &amp; OUD</b>"
+            },
+            "type": "paragraph"
+          },
+          {
+            "id": "0rp5bkwykg",
+            "data": {
+              "text": "<i> ABOUT PAGE </i>"
+            },
+            "type": "paragraph"
+          },
+          {
+            "id": "cN8UDLGtJd",
+            "data": {
+              "text": "Caspian king Perfumes &amp; Oud is a family owned business established in 2010 specializing as the name states , high quality perfumes &amp; oud. We strive to guarantee our customers peace of mind when making their choice of fragrance. So , we are here at your service, providing you also with the best possible quality &amp; price. Since we’ve opened our store, we have established Caspian king to be synonymous with excellent service, great value &amp; prime quality."
+            },
+            "type": "paragraph"
+          },
+          {
+            "id": "M0rj1YRTt3",
+            "data": {
+              "text": "Why compromise on quality in favour of price. Here at Caspian King P&amp;O we can offer you the best quality at an affordable price. So,put us to the test &amp; visit our store in Gatesville , Rylands or call 021 6370029 where you will find yourself immersed into a bouquet of fragrance sensation."
+            },
+            "type": "paragraph"
+          },
+          {
+            "id": "j3PsY5eFPb",
+            "data": {
+              "text": "We are at your service to make sure you leave contented once making your final choice of scent."
+            },
+            "type": "paragraph"
+          }
+        ],
+        "version": "2.24.3"
+      },
+      "created_at": "2024-04-24T14:16:19.001Z"
+    }
+  },
+  {
     "model": "product.category",
     "pk": 2,
     "fields": {
@@ -227,86 +330,6 @@
     }
   },
   {
-    "model": "menu.menuitem",
-    "pk": 1,
-    "fields": {
-      "sort_order": 1,
-      "private_metadata": {},
-      "metadata": {},
-      "menu": 2,
-      "name": "Saleor",
-      "parent": null,
-      "url": "/",
-      "category": null,
-      "collection": null,
-      "page": null,
-      "lft": 1,
-      "rght": 8,
-      "tree_id": 55,
-      "level": 0
-    }
-  },
-  {
-    "model": "menu.menuitem",
-    "pk": 2,
-    "fields": {
-      "sort_order": 2,
-      "private_metadata": {},
-      "metadata": {},
-      "menu": 2,
-      "name": "GraphQL API",
-      "parent": 1,
-      "url": "http://localhost:8000/graphql/",
-      "category": null,
-      "collection": null,
-      "page": null,
-      "lft": 4,
-      "rght": 5,
-      "tree_id": 55,
-      "level": 1
-    }
-  },
-  {
-    "model": "menu.menuitem",
-    "pk": 220,
-    "fields": {
-      "sort_order": 1,
-      "private_metadata": {},
-      "metadata": {},
-      "menu": 2,
-      "name": "Saleor",
-      "parent": null,
-      "url": "/",
-      "category": null,
-      "collection": null,
-      "page": null,
-      "lft": 1,
-      "rght": 10,
-      "tree_id": 55,
-      "level": 0
-    }
-  },
-  {
-    "model": "menu.menuitem",
-    "pk": 222,
-    "fields": {
-      "sort_order": 3,
-      "private_metadata": {},
-      "metadata": {},
-      "menu": 2,
-      "name": "GraphQL API",
-      "parent": 220,
-      "url": "http://localhost:8000/graphql/",
-      "category": null,
-      "collection": null,
-      "page": null,
-      "lft": 4,
-      "rght": 5,
-      "tree_id": 55,
-      "level": 1
-    }
-  },
-  {
     "model": "shipping.shippingzone",
     "pk": 2,
     "fields": {
@@ -376,6 +399,7 @@
   },
   {
     "model": "tax.taxclass",
+    "pk": 1,
     "fields": {
       "private_metadata": {},
       "metadata": {},
