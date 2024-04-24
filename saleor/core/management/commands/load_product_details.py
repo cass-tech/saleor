@@ -125,5 +125,6 @@ class Command(BaseCommand):
                         channel=default_channel,
                         currency='ZAR',
                         price_amount=variant['price'],
-                        cost_price_amount=0.9 * float(variant['price'])
+                        discounted_price_amount=variant['price'],
+                        cost_price_amount=0.6 * float(variant['price'])
                     )
