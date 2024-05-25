@@ -213,7 +213,7 @@
       "is_shipping_required": true,
       "is_digital": false,
       "weight": "100.0:g",
-      "tax_class": null
+      "tax_class": 1
     }
   },
   {
@@ -331,11 +331,11 @@
   },
   {
     "model": "shipping.shippingzone",
-    "pk": 2,
+    "pk": 1,
     "fields": {
       "private_metadata": {},
       "metadata": {},
-      "name": "default",
+      "name": "South Africa",
       "countries": "ZA",
       "default": false,
       "description": "",
@@ -346,20 +346,30 @@
   },
   {
     "model": "shipping.shippingmethod",
-    "pk": 2,
+    "pk": 1,
     "fields": {
       "private_metadata": {},
       "metadata": {},
-      "name": "default",
+      "name": "Standard",
       "type": "price",
-      "shipping_zone": 2,
+      "shipping_zone": 1,
       "minimum_order_weight": "0.0:g",
       "maximum_order_weight": null,
       "maximum_delivery_days": 4,
       "minimum_delivery_days": 2,
       "description": null,
-      "tax_class": null,
+      "tax_class": 1,
       "excluded_products": []
+    }
+  },
+  {
+    "model": "shipping.shippingmethodchannellisting",
+    "pk": 1,
+    "fields": {
+      "shipping_method": 1,
+      "channel": 1,
+      "price_amount": 70,
+      "currency": "ZAR"
     }
   },
   {
@@ -407,6 +417,15 @@
     }
   },
   {
+    "model": "tax.taxclasscountryrate",
+    "pk": 1,
+    "fields": {
+      "country": "ZA",
+      "rate": 15,
+      "tax_class": 1
+    }
+  },
+  {
     "model": "warehouse.channelwarehouse",
     "pk": 68,
     "fields": {
@@ -429,7 +448,7 @@
       "click_and_collect_option": "disabled",
       "is_private": true,
       "shipping_zones": [
-        2
+        1
       ]
     }
   }
