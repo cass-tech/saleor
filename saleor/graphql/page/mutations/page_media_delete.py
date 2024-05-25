@@ -39,5 +39,4 @@ class PageMediaDelete(BaseMutation):
         manager = get_plugin_manager_promise(info.context).get()
         cls.call_event(manager.page_updated, page)
         cls.call_event(manager.page_media_deleted, media_obj)
-        page = ChannelContext(node=page, channel_slug=None)
         return PageMediaDelete(page=page, media=media_obj)
