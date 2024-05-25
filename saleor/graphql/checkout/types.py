@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Optional
 import graphene
 from promise import Promise
 
+from ...account.models import User
 from ...checkout import calculations, models, problems
 from ...checkout.base_calculations import (
     calculate_undiscounted_base_line_total_price,
@@ -13,7 +14,6 @@ from ...checkout.calculations import fetch_checkout_data
 from ...checkout.utils import get_valid_collection_points_for_checkout
 from ...core.db.connection import allow_writer_in_context
 from ...core.taxes import zero_money, zero_taxed_money
-from ...core.utils.lazyobjects import unwrap_lazy
 from ...graphql.core.context import get_database_connection_name
 from ...payment.interface import ListStoredPaymentMethodsRequestData
 from ...permission.auth_filters import AuthorizationFilters
@@ -699,7 +699,7 @@ class Checkout(ModelObjectType[models.Checkout]):
     total_price = BaseField(
         TaxedMoney,
         description=(
-            "The sum of the the checkout line prices, with all the taxes,"
+            "The sum of the checkout line prices, with all the taxes,"
             "shipping costs, and discounts included."
         ),
         required=True,
@@ -859,7 +859,7 @@ class Checkout(ModelObjectType[models.Checkout]):
     def resolve_shipping_methods(root: models.Checkout, info: ResolveInfo):
         @allow_writer_in_context(info.context)
         def with_checkout_info(checkout_info):
-            return unwrap_lazy(checkout_info.all_shipping_methods)
+            return checkout_info.all_shipping_methods
 
         return (
             CheckoutInfoByCheckoutTokenLoader(info.context)
@@ -996,6 +996,7 @@ class Checkout(ModelObjectType[models.Checkout]):
             root.token
         )
 
+        @allow_writer_in_context(info.context)
         def get_available_payment_gateways(results):
             (checkout_info, lines_info) = results
             return manager.list_payment_gateways(
@@ -1282,7 +1283,9 @@ class Checkout(ModelObjectType[models.Checkout]):
         if not requestor or requestor.id != root.user_id:
             return []
 
-        def _resolve_stored_payment_methods(data):
+        def _resolve_stored_payment_methods(
+            data: tuple["Channel", "User", "PluginsManager"],
+        ):
             channel, user, manager = data
             request_data = ListStoredPaymentMethodsRequestData(
                 user=user,

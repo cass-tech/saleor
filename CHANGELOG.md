@@ -6,13 +6,17 @@ All notable, unreleased changes to this project will be documented in this file.
 # 3.20.0 [Unreleased]
 
 ### Highlights
+- Include transaction item in refund flow - #15590 by @korycins
 
 ### Breaking changes
+- Remove the `anonymize` plugin. Use `saleor/core/utils/anonymization` code instead. - by @aniav
 
 ### GraphQL API
 - Add `translatableContent` to all translation types; add translated object id to all translatable content types - #15617 by @zedzior
-
 - Add a `taxConfiguration` to a `Channel` - #15610 by @Air-t
+- Add `stocks` to a `Warehouse` - #15771 by @teddyondieki
+- Deprecate the `taxTypes` query - #15802 by @maarcingebala
+- Change permissions for `checkout` and `checkouts` queries. Add `HANDLE_PAYMENTS` to required permissions - #16010 by @Air-t
 
 ### Saleor Apps
 
@@ -20,6 +24,11 @@ All notable, unreleased changes to this project will be documented in this file.
 - Remove `prefetched_for_webhook` to legacy payload generators - #15369 by @AjmalPonneth
 - Don't raise InsufficientStock for track_inventory=False variants #15475 by @carlosa54
 - DB performance improvements in attribute dataloaders - #15474 by @AjmalPonneth
+- Calculate order promotions in draft orders - #15459 by @zedzior
+- Prevent name overwriting of Product Variants when Updating Product Types - #15670 by @teddyondieki
+- Added support for the `BrokerProperties` custom header to webhooks to support Azure Service Bus - #15899 by @patrys
+- Extend valid address values - #15877 by @zedzior
+- Fixed a rare crash in the introspection query detection code - #15966 by @patrys
 
 # 3.19.0
 

@@ -3134,7 +3134,9 @@ class WebhookPlugin(BasePlugin):
         return methods
 
     def get_tax_code_from_object_meta(
-        self, obj: Union["Product", "ProductType", "TaxClass"], previous_value: Any
+        self,
+        obj: Union["Product", "ProductType", "TaxClass"],
+        previous_value: Any,
     ):
         """Get tax code and description for a product or product type.
 

@@ -13,6 +13,7 @@ from django.utils import timezone
 from prices import Money
 
 from ..account.models import User
+from ..checkout.fetch import update_delivery_method_lists_for_checkout_info
 from ..core.db.connection import allow_writer
 from ..core.exceptions import ProductNotPublished
 from ..core.taxes import zero_taxed_money
@@ -32,8 +33,8 @@ from ..discount.models import (
     VoucherCode,
 )
 from ..discount.utils import (
-    create_discount_objects_for_catalogue_promotions,
-    create_discount_objects_for_order_promotions,
+    create_checkout_discount_objects_for_order_promotions,
+    create_checkout_line_discount_objects_for_catalogue_promotions,
     delete_gift_line,
     get_products_voucher_discount,
     get_voucher_code_instance,
@@ -53,10 +54,6 @@ from ..warehouse.models import Warehouse
 from ..warehouse.reservations import reserve_stocks_and_preorders
 from . import AddressType, base_calculations, calculations
 from .error_codes import CheckoutErrorCode
-from .fetch import (
-    update_checkout_info_delivery_method,
-    update_checkout_info_shipping_address,
-)
 from .models import Checkout, CheckoutLine, CheckoutMetadata
 
 if TYPE_CHECKING:
@@ -96,7 +93,7 @@ def recalculate_checkout_discounts(
     Update line and checkout discounts from vouchers and promotions.
     Create or remove gift line if needed.
     """
-    create_discount_objects_for_catalogue_promotions(lines)
+    create_checkout_line_discount_objects_for_catalogue_promotions(lines)
     recalculate_checkout_discount(manager, checkout_info, lines)
 
 
@@ -411,8 +408,13 @@ def change_shipping_address_in_checkout(
         if remove and checkout.shipping_address:
             checkout.shipping_address.delete()
         checkout.shipping_address = address
-        update_checkout_info_shipping_address(
-            checkout_info, address, lines, manager, shipping_channel_listings
+        update_delivery_method_lists_for_checkout_info(
+            checkout_info=checkout_info,
+            shipping_method=checkout_info.checkout.shipping_method,
+            collection_point=checkout_info.checkout.collection_point,
+            shipping_address=address,
+            lines=lines,
+            shipping_channel_listings=shipping_channel_listings,
         )
         updated_fields = ["shipping_address", "last_change"]
     return updated_fields
@@ -574,12 +576,21 @@ def get_voucher_for_checkout(
         except VoucherCode.DoesNotExist:
             return None, None
 
-        voucher = (
-            Voucher.objects.using(database_connection_name)
-            .active_in_channel(date=timezone.now(), channel_slug=channel_slug)
-            .filter(id=code.voucher_id)
-            .first()
-        )
+        # The voucher validation should be performed only when the voucher
+        # usage for this checkout hasn't been increased.
+        if checkout.is_voucher_usage_increased:
+            voucher = (
+                Voucher.objects.using(database_connection_name)
+                .filter(id=code.voucher_id)
+                .first()
+            )
+        else:
+            voucher = (
+                Voucher.objects.using(database_connection_name)
+                .active_in_channel(date=timezone.now(), channel_slug=channel_slug)
+                .filter(id=code.voucher_id)
+                .first()
+            )
 
         if not voucher:
             return None, None
@@ -692,7 +703,9 @@ def recalculate_checkout_discount(
     else:
         remove_voucher_from_checkout(checkout)
 
-    create_discount_objects_for_order_promotions(checkout_info, lines, save=True)
+    create_checkout_discount_objects_for_order_promotions(
+        checkout_info, lines, save=True
+    )
 
 
 def add_promo_code_to_checkout(
@@ -920,7 +933,17 @@ def clear_delivery_method(checkout_info: "CheckoutInfo"):
     checkout = checkout_info.checkout
     checkout.collection_point = None
     checkout.shipping_method = None
-    update_checkout_info_delivery_method(checkout_info, None)
+    checkout_info.shipping_method = None
+
+    update_delivery_method_lists_for_checkout_info(
+        checkout_info=checkout_info,
+        shipping_method=None,
+        collection_point=None,
+        shipping_address=checkout_info.shipping_address,
+        lines=checkout_info.lines,
+        shipping_channel_listings=checkout_info.shipping_channel_listings,
+    )
+
     delete_external_shipping_id(checkout=checkout)
     checkout.save(
         update_fields=[
@@ -1023,8 +1046,10 @@ def get_or_create_checkout_metadata(checkout: "Checkout") -> CheckoutMetadata:
         return CheckoutMetadata.objects.create(checkout=checkout)
 
 
+@allow_writer()
 def get_checkout_metadata(checkout: "Checkout"):
     if hasattr(checkout, "metadata_storage"):
+        # TODO: load metadata_storage with dataloader and pass as an argument
         return checkout.metadata_storage
     else:
         return CheckoutMetadata(checkout=checkout)

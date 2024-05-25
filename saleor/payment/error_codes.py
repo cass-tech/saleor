@@ -19,6 +19,7 @@ class PaymentErrorCode(Enum):
     CHECKOUT_EMAIL_NOT_SET = "checkout_email_not_set"
     UNAVAILABLE_VARIANT_IN_CHANNEL = "unavailable_variant_in_channel"
     NO_CHECKOUT_LINES = "no_checkout_lines"
+    CHECKOUT_COMPLETION_IN_PROGRESS = "checkout_completion_in_progress"
 
 
 class TransactionCreateErrorCode(Enum):
@@ -52,9 +53,12 @@ class TransactionRequestRefundForGrantedRefundErrorCode(Enum):
     INVALID = "invalid"
     GRAPHQL_ERROR = "graphql_error"
     NOT_FOUND = "not_found"
+    AMOUNT_GREATER_THAN_AVAILABLE = "amount_greater_than_available"
     MISSING_TRANSACTION_ACTION_REQUEST_WEBHOOK = (
         "missing_transaction_action_request_webhook"
     )
+    REFUND_ALREADY_PROCESSED = "refund_already_processed"
+    REFUND_IS_PENDING = "refund_is_pending"
 
 
 class TransactionEventReportErrorCode(Enum):

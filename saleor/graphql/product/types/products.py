@@ -9,6 +9,7 @@ from graphene import relay
 from promise import Promise
 
 from ....attribute import models as attribute_models
+from ....channel.models import Channel
 from ....core.utils import build_absolute_uri
 from ....core.utils.country import get_active_country
 from ....core.weight import convert_weight_to_default_weight_unit
@@ -116,6 +117,7 @@ from ...utils.filters import reporting_period_to_date
 from ...warehouse.dataloaders import (
     AvailableQuantityByProductVariantIdCountryCodeAndChannelSlugLoader,
     PreorderQuantityReservedByVariantChannelListingIdLoader,
+    StocksByProductVariantIdLoader,
     StocksWithAvailableQuantityByProductVariantIdCountryCodeAndChannelLoader,
 )
 from ...warehouse.types import Stock
@@ -435,9 +437,13 @@ class ProductVariant(ChannelContextTypeWithMetadata[models.ProductVariant]):
     ):
         if address is not None:
             country_code = address.country
-        return StocksWithAvailableQuantityByProductVariantIdCountryCodeAndChannelLoader(
-            info.context
-        ).load((root.node.id, country_code, root.channel_slug))
+        channle_slug = root.channel_slug
+        if channle_slug or country_code:
+            return StocksWithAvailableQuantityByProductVariantIdCountryCodeAndChannelLoader(  # noqa: E501
+                info.context
+            ).load((root.node.id, country_code, root.channel_slug))
+        else:
+            return StocksByProductVariantIdLoader(info.context).load(root.node.id)
 
     @staticmethod
     @load_site_callback
@@ -808,18 +814,24 @@ class ProductVariant(ChannelContextTypeWithMetadata[models.ProductVariant]):
             channels[root.channel].add(root.id)
 
         variants = {}
-        for channel, ids in channels.items():
+        database_connection_name = get_database_connection_name(info.context)
+        channels_map = Channel.objects.using(database_connection_name).in_bulk(
+            set(channels.keys()), field_name="slug"
+        )
+        for channel_slug, ids in channels.items():
+            limited_channel_access = False if channel_slug is None else True
             qs = resolve_product_variants(
                 info,
                 requestor_has_access_to_all,
                 requestor,
                 ids=ids,
-                channel_slug=channel,
+                channel=channels_map.get(channel_slug),
+                limited_channel_access=limited_channel_access,
             ).qs
             for variant in qs:
                 global_id = graphene.Node.to_global_id("ProductVariant", variant.id)
-                variants[f"{channel}_{global_id}"] = ChannelContext(
-                    channel_slug=channel, node=variant
+                variants[f"{channel_slug}_{global_id}"] = ChannelContext(
+                    channel_slug=channel_slug, node=variant
                 )
 
         return [variants.get(root_id) for root_id in roots_ids]
@@ -1052,7 +1064,9 @@ class Product(ChannelContextTypeWithMetadata[models.Product]):
     def resolve_tax_type(root: ChannelContext[models.Product], info):
         def with_tax_class(data):
             tax_class, manager = data
-            tax_data = manager.get_tax_code_from_object_meta(tax_class)
+            tax_data = manager.get_tax_code_from_object_meta(
+                tax_class, channel_slug=root.channel_slug
+            )
             return TaxType(tax_code=tax_data.code, description=tax_data.description)
 
         if root.node.tax_class_id:
@@ -1598,14 +1612,20 @@ class Product(ChannelContextTypeWithMetadata[models.Product]):
                 channels[root.channel].add(root_id)
 
         products = {}
-        for channel, ids in channels.items():
+
+        database_connection_name = get_database_connection_name(info.context)
+        channels_map = Channel.objects.using(database_connection_name).in_bulk(
+            set(channels.keys()), field_name="slug"
+        )
+        for channel_slug, ids in channels.items():
+            limited_channel_access = False if channel_slug is None else True
             queryset = resolve_products(
-                info, requestor, channel_slug=channel
+                info, requestor, channels_map.get(channel_slug), limited_channel_access
             ).qs.filter(id__in=ids)
 
             for product in queryset:
-                products[f"{channel}_{product.id}"] = ChannelContext(
-                    channel_slug=channel, node=product
+                products[f"{channel_slug}_{product.id}"] = ChannelContext(
+                    channel_slug=channel_slug, node=product
                 )
 
         return [products.get(root_id) for root_id in roots_ids]
@@ -1822,16 +1842,28 @@ class ProductType(ModelObjectType[models.ProductType]):
     @staticmethod
     def resolve_products(root: models.ProductType, info, *, channel=None, **kwargs):
         requestor = get_user_or_app_from_context(info.context)
+        limited_channel_access = False if channel is None else True
         if channel is None:
             channel = get_default_channel_slug_or_graphql_error(
                 allow_replica=info.context.allow_replica
             )
-        qs = root.products.using(
-            get_database_connection_name(info.context)
-        ).visible_to_user(requestor, channel)
-        qs = ChannelQsContext(qs=qs, channel_slug=channel)
-        kwargs["channel"] = channel
-        return create_connection_slice(qs, info, kwargs, ProductCountableConnection)
+
+        def _resolve_products(channel_obj):
+            qs = root.products.using(
+                get_database_connection_name(info.context)
+            ).visible_to_user(requestor, channel_obj, limited_channel_access)
+            qs = ChannelQsContext(qs=qs, channel_slug=channel)
+            kwargs["channel"] = channel
+            return create_connection_slice(qs, info, kwargs, ProductCountableConnection)
+
+        if channel:
+            return (
+                ChannelBySlugLoader(info.context)
+                .load(str(channel))
+                .then(_resolve_products)
+            )
+        else:
+            return _resolve_products(None)
 
     @staticmethod
     def resolve_available_attributes(root: models.ProductType, info, **kwargs):
