@@ -11,50 +11,63 @@ mutation DraftOrderUpdate($input: DraftOrderInput!, $id: ID!) {
     order {
       id
       lines {
-        totalPrice {
-          gross {
-            amount
-          }
-          tax {
-            amount
-          }
+        id
+        undiscountedUnitPrice {
+          ... BaseTaxedMoney
         }
         unitPrice {
-          gross {
+          ... BaseTaxedMoney
+        }
+        undiscountedTotalPrice {
+          ... BaseTaxedMoney
+        }
+        totalPrice {
+          ... BaseTaxedMoney
+        }
+        unitDiscount {
             amount
-          }
         }
         unitDiscountReason
       }
       subtotal {
-        gross {
-          amount
-        }
-        net {
-          amount
-        }
-        tax {
-          amount
-        }
+        ...BaseTaxedMoney
       }
       totalBalance {
         amount
       }
       total {
-        gross {
-          amount
-        }
-        net {
-          amount
-        }
-        tax {
-          amount
-        }
+        ...BaseTaxedMoney
       }
+      undiscountedTotal {
+        ...BaseTaxedMoney
+      }
+      voucherCode
       voucher {
         id
         code
         discountValue
+        codes(first: 10) {
+            edges {
+              node {
+                id
+                code
+                isActive
+                used
+              }
+            }
+            totalCount
+          }
+      }
+      discounts {
+        id
+        type
+        name
+        valueType
+        value
+        reason
+        amount {
+          amount
+        }
       }
       billingAddress {
         firstName
@@ -86,18 +99,10 @@ mutation DraftOrderUpdate($input: DraftOrderInput!, $id: ID!) {
       }
       isShippingRequired
       shippingPrice {
-        gross {
-          amount
-        }
-        net {
-          amount
-        }
-        tax {
-          amount
-        }
+        ...BaseTaxedMoney
       }
-      shippingMethod {
-        id
+      undiscountedShippingPrice {
+        amount
       }
       shippingMethods {
         id
@@ -117,7 +122,34 @@ mutation DraftOrderUpdate($input: DraftOrderInput!, $id: ID!) {
     }
   }
 }
+
+fragment BaseTaxedMoney on TaxedMoney {
+  gross {
+    amount
+  }
+  net {
+    amount
+  }
+  tax {
+    amount
+  }
+  currency
+}
 """
+
+
+def raw_draft_order_update(api_client, id, input):
+    variables = {"id": id, "input": input}
+
+    response = api_client.post_graphql(
+        DRAFT_ORDER_UPDATE_MUTATION,
+        variables=variables,
+    )
+    content = get_graphql_content(response)
+
+    data = content["data"]["draftOrderUpdate"]
+
+    return data
 
 
 def draft_order_update(

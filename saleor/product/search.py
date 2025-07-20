@@ -128,10 +128,9 @@ def generate_attributes_search_vector_value(
     """
     product_attributes = product.product_type.attributeproduct.all()
 
-    attributes = []
-    for product_attribute in product_attributes:
-        attributes.append(product_attribute.attribute)  # type: ignore
-    attributes = attributes[: settings.PRODUCT_MAX_INDEXED_ATTRIBUTES]
+    attributes = [
+        product_attribute.attribute for product_attribute in product_attributes
+    ][: settings.PRODUCT_MAX_INDEXED_ATTRIBUTES]
 
     assigned_values = product.attributevalues.all()
 

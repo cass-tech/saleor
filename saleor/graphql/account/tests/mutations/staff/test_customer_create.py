@@ -3,15 +3,16 @@ from urllib.parse import urlencode
 
 from ......account import events as account_events
 from ......account.error_codes import AccountErrorCode
-from ......account.models import User
+from ......account.models import Address, User
 from ......account.notifications import get_default_user_payload
 from ......account.search import (
     generate_address_search_document_value,
     generate_user_fields_search_document_value,
 )
-from ......core.notify_events import NotifyEventType
+from ......core.notify import NotifyEventType
 from ......core.tests.utils import get_site_context_payload
 from ......core.utils.url import prepare_url
+from ......tests import race_condition
 from .....tests.utils import get_graphql_content
 from ....tests.utils import convert_dict_keys_to_camel_case
 
@@ -84,7 +85,7 @@ CUSTOMER_CREATE_MUTATION = """
 
 
 @patch("saleor.plugins.manager.PluginsManager.customer_metadata_updated")
-@patch("saleor.account.notifications.default_token_generator.make_token")
+@patch("saleor.account.notifications.token_generator.make_token")
 @patch("saleor.plugins.manager.PluginsManager.notify")
 @patch("saleor.plugins.manager.PluginsManager.account_set_password_requested")
 def test_customer_create(
@@ -109,6 +110,7 @@ def test_customer_create(
     stored_metadata = {"test key": "test value"}
     address_data["metadata"] = metadata
     address_data.pop("privateMetadata")
+    address_data.pop("validationSkipped")
 
     redirect_url = "https://www.example.com"
     external_reference = "test-ext-ref"
@@ -178,14 +180,19 @@ def test_customer_create(
         "channel_slug": channel_PLN.slug,
         **get_site_context_payload(site_settings.site),
     }
-    mocked_notify.assert_called_once_with(
-        NotifyEventType.ACCOUNT_SET_CUSTOMER_PASSWORD,
-        payload=expected_payload,
-        channel_slug=channel_PLN.slug,
-    )
+
+    assert mocked_notify.call_count == 1
+    call_args = mocked_notify.call_args_list[0]
+    called_args = call_args.args
+    called_kwargs = call_args.kwargs
+    assert called_args[0] == NotifyEventType.ACCOUNT_SET_CUSTOMER_PASSWORD
+    assert len(called_kwargs) == 2
+    assert called_kwargs["payload_func"]() == expected_payload
+    assert called_kwargs["channel_slug"] == channel_PLN.slug
+
     mocked_customer_metadata_updated.assert_called_once_with(new_user)
 
-    assert set([shipping_address, billing_address]) == set(new_user.addresses.all())
+    assert {shipping_address, billing_address} == set(new_user.addresses.all())
     customer_creation_event = account_events.CustomerEvent.objects.get()
     assert customer_creation_event.type == account_events.CustomerEvents.ACCOUNT_CREATED
     assert customer_creation_event.user == new_customer
@@ -196,7 +203,7 @@ def test_customer_create(
 
 
 @patch("saleor.plugins.manager.PluginsManager.customer_metadata_updated")
-@patch("saleor.account.notifications.default_token_generator.make_token")
+@patch("saleor.account.notifications.token_generator.make_token")
 @patch("saleor.plugins.manager.PluginsManager.notify")
 @patch("saleor.plugins.manager.PluginsManager.account_set_password_requested")
 def test_customer_create_as_app(
@@ -221,6 +228,7 @@ def test_customer_create_as_app(
     stored_metadata = {"test key": "test value"}
     address_data["metadata"] = metadata
     address_data.pop("privateMetadata")
+    address_data.pop("validationSkipped")
 
     redirect_url = "https://www.example.com"
     external_reference = "test-ext-ref"
@@ -295,14 +303,19 @@ def test_customer_create_as_app(
         "channel_slug": channel_PLN.slug,
         **get_site_context_payload(site_settings.site),
     }
-    mocked_notify.assert_called_once_with(
-        NotifyEventType.ACCOUNT_SET_CUSTOMER_PASSWORD,
-        payload=expected_payload,
-        channel_slug=channel_PLN.slug,
-    )
+
+    assert mocked_notify.call_count == 1
+    call_args = mocked_notify.call_args_list[0]
+    called_args = call_args.args
+    called_kwargs = call_args.kwargs
+    assert called_args[0] == NotifyEventType.ACCOUNT_SET_CUSTOMER_PASSWORD
+    assert len(called_kwargs) == 2
+    assert called_kwargs["payload_func"]() == expected_payload
+    assert called_kwargs["channel_slug"] == channel_PLN.slug
+
     mocked_customer_metadata_updated.assert_called_once_with(new_user)
 
-    assert set([shipping_address, billing_address]) == set(new_user.addresses.all())
+    assert {shipping_address, billing_address} == set(new_user.addresses.all())
     customer_creation_event = account_events.CustomerEvent.objects.get()
     assert customer_creation_event.type == account_events.CustomerEvents.ACCOUNT_CREATED
     assert customer_creation_event.user == new_customer
@@ -312,7 +325,7 @@ def test_customer_create_as_app(
     )
 
 
-@patch("saleor.account.notifications.default_token_generator.make_token")
+@patch("saleor.account.notifications.token_generator.make_token")
 @patch("saleor.plugins.manager.PluginsManager.notify")
 def test_customer_create_send_password_with_url(
     mocked_notify,
@@ -350,11 +363,15 @@ def test_customer_create_send_password_with_url(
         "channel_slug": channel_PLN.slug,
         **get_site_context_payload(site_settings.site),
     }
-    mocked_notify.assert_called_once_with(
-        NotifyEventType.ACCOUNT_SET_CUSTOMER_PASSWORD,
-        payload=expected_payload,
-        channel_slug=channel_PLN.slug,
-    )
+
+    assert mocked_notify.call_count == 1
+    call_args = mocked_notify.call_args_list[0]
+    called_args = call_args.args
+    called_kwargs = call_args.kwargs
+    assert called_args[0] == NotifyEventType.ACCOUNT_SET_CUSTOMER_PASSWORD
+    assert len(called_kwargs) == 2
+    assert called_kwargs["payload_func"]() == expected_payload
+    assert called_kwargs["channel_slug"] == channel_PLN.slug
 
 
 def test_customer_create_empty_metadata_key(
@@ -372,6 +389,7 @@ def test_customer_create_empty_metadata_key(
     address_data = convert_dict_keys_to_camel_case(address.as_data())
     address_data.pop("metadata")
     address_data.pop("privateMetadata")
+    address_data.pop("validationSkipped")
 
     redirect_url = "https://www.example.com"
     external_reference = "test-ext-ref"
@@ -399,7 +417,7 @@ def test_customer_create_empty_metadata_key(
     content = get_graphql_content(response)
     errors = content["data"]["customerCreate"]["errors"]
     assert len(errors) == 1
-    assert errors[0]["field"] == "input"
+    assert errors[0]["field"] == "metadata"
     assert errors[0]["code"] == AccountErrorCode.REQUIRED.name
 
 
@@ -495,7 +513,7 @@ def test_customer_create_with_non_unique_external_reference(
     assert error["message"] == "User with this External reference already exists."
 
 
-@patch("saleor.account.notifications.default_token_generator.make_token")
+@patch("saleor.account.notifications.token_generator.make_token")
 @patch("saleor.plugins.webhook.plugin.trigger_webhooks_async")
 def test_customer_create_webhook_event_triggered(
     mocked_trigger_webhooks_async,
@@ -514,6 +532,7 @@ def test_customer_create_webhook_event_triggered(
     email = "api_user@example.com"
     address_data = convert_dict_keys_to_camel_case(address.as_data())
     address_data.pop("privateMetadata")
+    address_data.pop("validationSkipped")
 
     variables = {
         "email": email,
@@ -536,3 +555,54 @@ def test_customer_create_webhook_event_triggered(
     # then
     User.objects.get(email=email)
     mocked_trigger_webhooks_async.assert_called()
+
+
+def test_customer_create_race_condition(
+    staff_api_client, site_settings, permission_manage_users, address
+):
+    """Context.
+
+    This test checks case when two concurrent mutations fail,
+    due to unique constraint on email field. In race-condition scenario it's possible
+    that two calls will pass validation (user doesn't exist yet), but the second one
+    will fail due to DB having a user created already.
+    """
+
+    # given
+    site_settings.enable_account_confirmation_by_email = False
+    site_settings.save(update_fields=["enable_account_confirmation_by_email"])
+
+    email_to_create = "test-user@example.com"
+
+    address_data = convert_dict_keys_to_camel_case(address.as_data())
+    address_data.pop("privateMetadata")
+    address_data.pop("validationSkipped")
+
+    variables = {
+        "shipping": address_data,
+        "billing": address_data,
+        "email": email_to_create,
+        "firstName": "api_first_name",
+        "lastName": "api_last_name",
+    }
+
+    def create_existing_customer(*args, **kwargs):
+        User.objects.create(email=email_to_create)
+
+    with race_condition.RunBefore(
+        "saleor.graphql.account.mutations.staff.customer_create.CustomerCreate._save",
+        create_existing_customer,
+    ):
+        response = staff_api_client.post_graphql(
+            CUSTOMER_CREATE_MUTATION, variables, permissions=[permission_manage_users]
+        )
+
+        content = get_graphql_content(response)
+
+        errors_list = content["data"]["customerCreate"]["errors"]
+
+        assert len(errors_list) == 1
+        assert errors_list[0]["code"] == "UNIQUE"
+
+        # make sure that addresses were not saved.
+        assert not Address.objects.exclude(id=address.id).exists()

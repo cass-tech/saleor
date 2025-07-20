@@ -1,17 +1,13 @@
 from typing import TYPE_CHECKING, Union
 
 from django.contrib.postgres.indexes import GinIndex
-from django.db import models, transaction
-from django.db.models import JSONField
+from django.db import models
 
-from . import PageMediaTypes
 from ..core.db.fields import SanitizedJSONField
-from ..core.models import ModelWithMetadata, PublishableModel, PublishedQuerySet, \
-    SortableModel
+from ..core.models import ModelWithMetadata, PublishableModel, PublishedQuerySet
 from ..core.utils.editorjs import clean_editor_js
-from ..graphql.channel import ChannelContext
 from ..permission.enums import PagePermissions, PageTypePermissions
-from ..seo.models import SeoModel, SeoModelTranslation
+from ..seo.models import SeoModel, SeoModelTranslationWithSlug
 
 if TYPE_CHECKING:
     from ..account.models import User
@@ -23,13 +19,6 @@ class PageQueryset(PublishedQuerySet):
         if requestor and requestor.has_perm(PagePermissions.MANAGE_PAGES):
             return self.all()
         return self.published()
-
-    def prefetched_for_webhook(self, single_object=True):
-        common_fields = (
-            "media",
-        )
-
-        return self.prefetch_related(*common_fields)
 
 
 PageManager = models.Manager.from_queryset(PageQueryset)
@@ -44,7 +33,7 @@ class Page(ModelWithMetadata, SeoModel, PublishableModel):
     content = SanitizedJSONField(blank=True, null=True, sanitizer=clean_editor_js)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
-    objects = PageManager()  # type: ignore[assignment,misc]
+    objects = PageManager()  # type: ignore[misc]
 
     class Meta(ModelWithMetadata.Meta):
         ordering = ("slug",)
@@ -55,39 +44,7 @@ class Page(ModelWithMetadata, SeoModel, PublishableModel):
         return self.title
 
 
-class PageMedia(SortableModel, ModelWithMetadata):
-    page = models.ForeignKey(
-        Page,
-        related_name="media",
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True
-    )
-    image = models.ImageField(upload_to="pages", blank=True, null=True)
-    alt = models.CharField(max_length=250, blank=True)
-    type = models.CharField(
-        max_length=32,
-        choices=PageMediaTypes.CHOICES,
-        default=PageMediaTypes.IMAGE,
-    )
-    external_url = models.CharField(max_length=256, blank=True, null=True)
-    oembed_data = JSONField(blank=True, default=dict)
-
-    class Meta(ModelWithMetadata.Meta):
-        ordering = ("sort_order", "pk")
-        app_label = "page"
-
-    def get_ordering_queryset(self):
-        if not self.page:
-            return PageMedia.objects.none()
-        return self.page.media.all()
-
-    @transaction.atomic
-    def delete(self, *args, **kwargs):
-        super(SortableModel, self).delete(*args, **kwargs)
-
-
-class PageTranslation(SeoModelTranslation):
+class PageTranslation(SeoModelTranslationWithSlug):
     page = models.ForeignKey(
         Page, related_name="translations", on_delete=models.CASCADE
     )
@@ -95,6 +52,12 @@ class PageTranslation(SeoModelTranslation):
     content = SanitizedJSONField(blank=True, null=True, sanitizer=clean_editor_js)
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["language_code", "slug"],
+                name="uniq_lang_slug_pagetransl",
+            ),
+        ]
         ordering = ("language_code", "page", "pk")
         unique_together = (("language_code", "page"),)
 

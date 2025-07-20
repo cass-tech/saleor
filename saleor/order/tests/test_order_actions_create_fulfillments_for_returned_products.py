@@ -5,7 +5,6 @@ from prices import Money, TaxedMoney
 
 from ...payment.interface import RefundData
 from ...plugins.manager import get_plugins_manager
-from ...tests.utils import flush_post_commit_hooks
 from ...warehouse.models import Allocation, Stock
 from .. import FulfillmentLineData, FulfillmentStatus, OrderEvents, OrderOrigin
 from ..actions import create_fulfillments_for_returned_products
@@ -13,14 +12,17 @@ from ..fetch import OrderLineInfo
 from ..models import Fulfillment, FulfillmentLine
 
 
+@patch("saleor.plugins.manager.PluginsManager.draft_order_created")
 @patch("saleor.plugins.manager.PluginsManager.order_updated")
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_create_return_fulfillment_only_order_lines(
     mocked_refund,
     mocked_order_updated,
+    mocked_draft_order_created,
     order_with_lines,
     payment_dummy_fully_charged,
     staff_user,
+    django_capture_on_commit_callbacks,
 ):
     order_with_lines.payments.add(payment_dummy_fully_charged)
     payment = order_with_lines.get_last_payment()
@@ -35,18 +37,19 @@ def test_create_return_fulfillment_only_order_lines(
     )
     lines_count = order_with_lines.lines.count()
 
-    response = create_fulfillments_for_returned_products(
-        user=staff_user,
-        app=None,
-        order=order_with_lines,
-        payment=payment,
-        order_lines=[
-            OrderLineInfo(line=line, quantity=2, replace=False)
-            for line in order_lines_to_return
-        ],
-        fulfillment_lines=[],
-        manager=get_plugins_manager(allow_replica=False),
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = create_fulfillments_for_returned_products(
+            user=staff_user,
+            app=None,
+            order=order_with_lines,
+            payment=payment,
+            order_lines=[
+                OrderLineInfo(line=line, quantity=2, replace=False)
+                for line in order_lines_to_return
+            ],
+            fulfillment_lines=[],
+            manager=get_plugins_manager(allow_replica=False),
+        )
     returned_fulfillment, replaced_fulfillment, replace_order = response
 
     returned_fulfillment_lines = returned_fulfillment.lines.all()
@@ -71,7 +74,6 @@ def test_create_return_fulfillment_only_order_lines(
     assert not replace_order
 
     # check if we have correct events
-    flush_post_commit_hooks()
     events = order_with_lines.events.all()
     assert events.count() == 1
     returned_event = events[0]
@@ -84,17 +86,21 @@ def test_create_return_fulfillment_only_order_lines(
     assert order_lines_to_return.filter(id=event_lines[1]["line_pk"]).exists()
     assert event_lines[1]["quantity"] == 2
 
-    mocked_order_updated.assert_called_once_with(order_with_lines)
+    mocked_order_updated.assert_called_once_with(order_with_lines, webhooks=set())
+    mocked_draft_order_created.assert_not_called()
 
 
+@patch("saleor.plugins.manager.PluginsManager.draft_order_created")
 @patch("saleor.plugins.manager.PluginsManager.order_updated")
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_create_return_fulfillment_only_order_lines_with_refund(
     mocked_refund,
     mocked_order_updated,
+    mocked_draft_order_created,
     order_with_lines,
     payment_dummy_fully_charged,
     staff_user,
+    django_capture_on_commit_callbacks,
 ):
     order_with_lines.payments.add(payment_dummy_fully_charged)
     payment = order_with_lines.get_last_payment()
@@ -113,19 +119,19 @@ def test_create_return_fulfillment_only_order_lines_with_refund(
         OrderLineInfo(line=line, quantity=2, replace=False)
         for line in order_lines_to_return
     ]
-    response = create_fulfillments_for_returned_products(
-        user=staff_user,
-        app=None,
-        order=order_with_lines,
-        payment=payment,
-        order_lines=order_lines_to_refund,
-        fulfillment_lines=[],
-        manager=get_plugins_manager(allow_replica=False),
-        refund=True,
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = create_fulfillments_for_returned_products(
+            user=staff_user,
+            app=None,
+            order=order_with_lines,
+            payment=payment,
+            order_lines=order_lines_to_refund,
+            fulfillment_lines=[],
+            manager=get_plugins_manager(allow_replica=False),
+            refund=True,
+        )
     returned_fulfillment, replaced_fulfillment, replace_order = response
 
-    flush_post_commit_hooks()
     returned_fulfillment_lines = returned_fulfillment.lines.all()
     assert returned_fulfillment.status == FulfillmentStatus.REFUNDED_AND_RETURNED
     assert len(returned_fulfillment_lines) == lines_count
@@ -160,17 +166,21 @@ def test_create_return_fulfillment_only_order_lines_with_refund(
     assert returned_fulfillment.total_refund_amount == amount
     assert returned_fulfillment.shipping_refund_amount is None
 
-    mocked_order_updated.assert_called_once_with(order_with_lines)
+    mocked_order_updated.assert_called_once_with(order_with_lines, webhooks=set())
+    mocked_draft_order_created.assert_not_called()
 
 
+@patch("saleor.plugins.manager.PluginsManager.draft_order_created")
 @patch("saleor.plugins.manager.PluginsManager.order_updated")
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_create_return_fulfillment_only_order_lines_included_shipping_costs(
     mocked_refund,
     mocked_order_updated,
+    mocked_draft_order_created,
     order_with_lines,
     payment_dummy_fully_charged,
     staff_user,
+    django_capture_on_commit_callbacks,
 ):
     order_with_lines.payments.add(payment_dummy_fully_charged)
     payment = order_with_lines.get_last_payment()
@@ -189,20 +199,20 @@ def test_create_return_fulfillment_only_order_lines_included_shipping_costs(
         OrderLineInfo(line=line, quantity=2, replace=False)
         for line in order_lines_to_return
     ]
-    response = create_fulfillments_for_returned_products(
-        user=staff_user,
-        app=None,
-        order=order_with_lines,
-        payment=payment,
-        order_lines=order_lines_to_refund,
-        fulfillment_lines=[],
-        manager=get_plugins_manager(allow_replica=False),
-        refund=True,
-        refund_shipping_costs=True,
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = create_fulfillments_for_returned_products(
+            user=staff_user,
+            app=None,
+            order=order_with_lines,
+            payment=payment,
+            order_lines=order_lines_to_refund,
+            fulfillment_lines=[],
+            manager=get_plugins_manager(allow_replica=False),
+            refund=True,
+            refund_shipping_costs=True,
+        )
     returned_fulfillment, replaced_fulfillment, replace_order = response
 
-    flush_post_commit_hooks()
     returned_fulfillment_lines = returned_fulfillment.lines.all()
     assert returned_fulfillment.status == FulfillmentStatus.REFUNDED_AND_RETURNED
     assert len(returned_fulfillment_lines) == lines_count
@@ -242,17 +252,21 @@ def test_create_return_fulfillment_only_order_lines_included_shipping_costs(
         == order_with_lines.shipping_price_gross_amount
     )
 
-    mocked_order_updated.assert_called_once_with(order_with_lines)
+    mocked_order_updated.assert_called_once_with(order_with_lines, webhooks=set())
+    mocked_draft_order_created.assert_not_called()
 
 
+@patch("saleor.plugins.manager.PluginsManager.draft_order_created")
 @patch("saleor.plugins.manager.PluginsManager.order_updated")
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_create_return_fulfillment_only_order_lines_with_replace_request(
     mocked_refund,
     mocked_order_updated,
+    mocked_draft_order_created,
     order_with_lines,
     payment_dummy_fully_charged,
     staff_user,
+    django_capture_on_commit_callbacks,
 ):
     order_with_lines.payments.add(payment_dummy_fully_charged)
     payment = order_with_lines.get_last_payment()
@@ -281,18 +295,18 @@ def test_create_return_fulfillment_only_order_lines_with_replace_request(
     order_with_lines.private_metadata = {"priv_test_key": "priv_test_val"}
     order_with_lines.save(update_fields=["metadata", "private_metadata"])
 
-    response = create_fulfillments_for_returned_products(
-        user=staff_user,
-        app=None,
-        order=order_with_lines,
-        payment=payment,
-        order_lines=order_lines_data,
-        fulfillment_lines=[],
-        manager=get_plugins_manager(allow_replica=False),
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = create_fulfillments_for_returned_products(
+            user=staff_user,
+            app=None,
+            order=order_with_lines,
+            payment=payment,
+            order_lines=order_lines_data,
+            fulfillment_lines=[],
+            manager=get_plugins_manager(allow_replica=False),
+        )
     returned_fulfillment, replaced_fulfillment, replace_order = response
 
-    flush_post_commit_hooks()
     returned_fulfillment_lines = returned_fulfillment.lines.all()
     assert returned_fulfillment.status == FulfillmentStatus.RETURNED
     # we replaced one line
@@ -348,7 +362,7 @@ def test_create_return_fulfillment_only_order_lines_with_replace_request(
 
     expected_replaced_line = order_lines_to_return[0]
 
-    assert replace_order.lines.count() == 1
+    assert replace_order.lines_count == replace_order.lines.count() == 1
     replaced_line = replace_order.lines.first()
     # make sure that all data from original line is in replaced line
     assert replaced_line.variant_id == expected_replaced_line.variant_id
@@ -373,17 +387,21 @@ def test_create_return_fulfillment_only_order_lines_with_replace_request(
     )
     assert replaced_line.tax_rate == expected_replaced_line.tax_rate
 
-    mocked_order_updated.assert_called_once_with(order_with_lines)
+    mocked_order_updated.assert_called_once_with(order_with_lines, webhooks=set())
+    mocked_draft_order_created.assert_called_once_with(replace_order, webhooks=set())
 
 
+@patch("saleor.plugins.manager.PluginsManager.draft_order_created")
 @patch("saleor.plugins.manager.PluginsManager.order_updated")
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_create_return_fulfillment_only_fulfillment_lines(
     mocked_refund,
     mocked_order_updated,
+    mocked_draft_order_created,
     fulfilled_order,
     payment_dummy_fully_charged,
     staff_user,
+    django_capture_on_commit_callbacks,
 ):
     fulfilled_order.payments.add(payment_dummy_fully_charged)
     payment = fulfilled_order.get_last_payment()
@@ -391,22 +409,22 @@ def test_create_return_fulfillment_only_fulfillment_lines(
     fulfillment_lines = FulfillmentLine.objects.filter(order_line_id__in=order_line_ids)
     original_quantity = {line.id: line.quantity for line in fulfillment_lines}
 
-    response = create_fulfillments_for_returned_products(
-        user=staff_user,
-        app=None,
-        order=fulfilled_order,
-        payment=payment,
-        order_lines=[],
-        fulfillment_lines=[
-            FulfillmentLineData(line=line, quantity=2, replace=False)
-            for line in fulfillment_lines
-        ],
-        manager=get_plugins_manager(allow_replica=False),
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = create_fulfillments_for_returned_products(
+            user=staff_user,
+            app=None,
+            order=fulfilled_order,
+            payment=payment,
+            order_lines=[],
+            fulfillment_lines=[
+                FulfillmentLineData(line=line, quantity=2, replace=False)
+                for line in fulfillment_lines
+            ],
+            manager=get_plugins_manager(allow_replica=False),
+        )
 
     returned_fulfillment, replaced_fulfillment, replace_order = response
 
-    flush_post_commit_hooks()
     returned_fulfillment_lines = returned_fulfillment.lines.all()
     assert returned_fulfillment.status == FulfillmentStatus.RETURNED
     assert returned_fulfillment_lines.count() == len(order_line_ids)
@@ -421,17 +439,20 @@ def test_create_return_fulfillment_only_fulfillment_lines(
     assert not mocked_refund.called
     assert not replace_order
 
-    mocked_order_updated.assert_called_once_with(fulfilled_order)
+    mocked_order_updated.assert_called_once_with(fulfilled_order, webhooks=set())
 
 
+@patch("saleor.plugins.manager.PluginsManager.draft_order_created")
 @patch("saleor.plugins.manager.PluginsManager.order_updated")
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_create_return_fulfillment_only_fulfillment_lines_replace_order(
     mocked_refund,
     mocked_order_updated,
+    mocked_draft_order_created,
     fulfilled_order,
     payment_dummy_fully_charged,
     staff_user,
+    django_capture_on_commit_callbacks,
 ):
     fulfilled_order.payments.add(payment_dummy_fully_charged)
     payment = fulfilled_order.get_last_payment()
@@ -449,19 +470,19 @@ def test_create_return_fulfillment_only_fulfillment_lines_replace_order(
     fulfillment_lines_to_return[0].replace = True
     fulfillment_lines_to_return[0].quantity = replace_quantity
 
-    response = create_fulfillments_for_returned_products(
-        user=staff_user,
-        app=None,
-        order=fulfilled_order,
-        payment=payment,
-        order_lines=[],
-        fulfillment_lines=fulfillment_lines_to_return,
-        manager=get_plugins_manager(allow_replica=False),
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = create_fulfillments_for_returned_products(
+            user=staff_user,
+            app=None,
+            order=fulfilled_order,
+            payment=payment,
+            order_lines=[],
+            fulfillment_lines=fulfillment_lines_to_return,
+            manager=get_plugins_manager(allow_replica=False),
+        )
 
     returned_fulfillment, replaced_fulfillment, replace_order = response
 
-    flush_post_commit_hooks()
     returned_fulfillment_lines = returned_fulfillment.lines.all()
     assert returned_fulfillment.status == FulfillmentStatus.RETURNED
     # make sure that all order lines from refund are in expected fulfillment
@@ -503,7 +524,7 @@ def test_create_return_fulfillment_only_fulfillment_lines_replace_order(
 
     expected_replaced_line = fulfillment_lines[0].order_line
 
-    assert replace_order.lines.count() == 1
+    assert replace_order.lines_count == replace_order.lines.count() == 1
     replaced_line = replace_order.lines.first()
     # make sure that all data from original line is in replaced line
     assert replaced_line.variant_id == expected_replaced_line.variant_id
@@ -528,20 +549,24 @@ def test_create_return_fulfillment_only_fulfillment_lines_replace_order(
     )
     assert replaced_line.tax_rate == expected_replaced_line.tax_rate
 
-    mocked_order_updated.assert_called_once_with(fulfilled_order)
+    mocked_order_updated.assert_called_once_with(fulfilled_order, webhooks=set())
+    mocked_draft_order_created.assert_called_once_with(replace_order, webhooks=set())
 
 
+@patch("saleor.plugins.manager.PluginsManager.draft_order_created")
 @patch("saleor.plugins.manager.PluginsManager.order_updated")
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_create_return_fulfillment_with_lines_already_refunded(
     mocked_refund,
     mocked_order_updated,
+    mocked_draft_order_created,
     fulfilled_order,
     payment_dummy_fully_charged,
     staff_user,
     channel_USD,
     variant,
     warehouse,
+    django_capture_on_commit_callbacks,
 ):
     fulfilled_order.payments.add(payment_dummy_fully_charged)
     payment = fulfilled_order.get_last_payment()
@@ -591,18 +616,19 @@ def test_create_return_fulfillment_with_lines_already_refunded(
     fulfillment_lines_to_process.append(
         FulfillmentLineData(line=refunded_fulfillment_line, quantity=2)
     )
-    create_fulfillments_for_returned_products(
-        user=staff_user,
-        app=None,
-        order=fulfilled_order,
-        payment=payment,
-        order_lines=[],
-        fulfillment_lines=fulfillment_lines_to_process,
-        manager=get_plugins_manager(allow_replica=False),
-        refund=True,
-    )
 
-    flush_post_commit_hooks()
+    with django_capture_on_commit_callbacks(execute=True):
+        create_fulfillments_for_returned_products(
+            user=staff_user,
+            app=None,
+            order=fulfilled_order,
+            payment=payment,
+            order_lines=[],
+            fulfillment_lines=fulfillment_lines_to_process,
+            manager=get_plugins_manager(allow_replica=False),
+            refund=True,
+        )
+
     returned_and_refunded_fulfillment = Fulfillment.objects.get(
         order=fulfilled_order, status=FulfillmentStatus.REFUNDED_AND_RETURNED
     )
@@ -636,17 +662,21 @@ def test_create_return_fulfillment_with_lines_already_refunded(
     assert returned_and_refunded_fulfillment.total_refund_amount == amount
     assert returned_and_refunded_fulfillment.shipping_refund_amount is None
 
-    mocked_order_updated.assert_called_once_with(fulfilled_order)
+    mocked_order_updated.assert_called_once_with(fulfilled_order, webhooks=set())
+    mocked_draft_order_created.assert_not_called()
 
 
+@patch("saleor.plugins.manager.PluginsManager.draft_order_created")
 @patch("saleor.plugins.manager.PluginsManager.order_updated")
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_create_return_fulfillment_only_order_lines_with_old_ids(
     mocked_refund,
     mocked_order_updated,
+    mocked_draft_order_created,
     order_with_lines,
     payment_dummy_fully_charged,
     staff_user,
+    django_capture_on_commit_callbacks,
 ):
     order_with_lines.payments.add(payment_dummy_fully_charged)
     payment = order_with_lines.get_last_payment()
@@ -663,18 +693,19 @@ def test_create_return_fulfillment_only_order_lines_with_old_ids(
     )
     lines_count = order_with_lines.lines.count()
 
-    response = create_fulfillments_for_returned_products(
-        user=staff_user,
-        app=None,
-        order=order_with_lines,
-        payment=payment,
-        order_lines=[
-            OrderLineInfo(line=line, quantity=2, replace=False)
-            for line in order_lines_to_return
-        ],
-        fulfillment_lines=[],
-        manager=get_plugins_manager(allow_replica=False),
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = create_fulfillments_for_returned_products(
+            user=staff_user,
+            app=None,
+            order=order_with_lines,
+            payment=payment,
+            order_lines=[
+                OrderLineInfo(line=line, quantity=2, replace=False)
+                for line in order_lines_to_return
+            ],
+            fulfillment_lines=[],
+            manager=get_plugins_manager(allow_replica=False),
+        )
     returned_fulfillment, replaced_fulfillment, replace_order = response
 
     returned_fulfillment_lines = returned_fulfillment.lines.all()
@@ -699,7 +730,6 @@ def test_create_return_fulfillment_only_order_lines_with_old_ids(
     assert not replace_order
 
     # check if we have correct events
-    flush_post_commit_hooks()
     events = order_with_lines.events.all()
     assert events.count() == 1
     returned_event = events[0]
@@ -712,4 +742,5 @@ def test_create_return_fulfillment_only_order_lines_with_old_ids(
     assert order_lines_to_return.filter(id=event_lines[1]["line_pk"]).exists()
     assert event_lines[1]["quantity"] == 2
 
-    mocked_order_updated.assert_called_once_with(order_with_lines)
+    mocked_order_updated.assert_called_once_with(order_with_lines, webhooks=set())
+    mocked_draft_order_created.assert_not_called()

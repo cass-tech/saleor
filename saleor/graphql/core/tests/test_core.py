@@ -19,8 +19,8 @@ from ...utils import requestor_is_superuser
 from ...utils.filters import filter_range_field, reporting_period_to_date
 from ..enums import ReportingPeriod
 from ..filters import EnumFilter
+from ..filters.filter_input import FilterInputObjectType
 from ..mutations import BaseMutation, ModelWithExtRefMutation
-from ..types import FilterInputObjectType
 from ..utils import (
     add_hash_to_file_name,
     ext_ref_to_global_id_or_error,
@@ -130,7 +130,7 @@ def test_filter_input():
         def created_filter(self, queryset, _, value):
             if CreatedEnum.WEEK == value:
                 return queryset
-            elif CreatedEnum.YEAR == value:
+            if CreatedEnum.YEAR == value:
                 return queryset
             return queryset
 
@@ -271,7 +271,7 @@ def test_requestor_is_superuser_for_app(app):
 def test_get_oembed_data(url, expected_media_type):
     oembed_data, media_type = get_oembed_data(url, "media_url")
 
-    assert oembed_data is not {}
+    assert oembed_data != {}
     assert media_type == expected_media_type
 
 

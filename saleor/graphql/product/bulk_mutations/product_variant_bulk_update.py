@@ -3,26 +3,27 @@ from typing import cast
 
 import graphene
 from django.core.exceptions import ValidationError
-from django.db.models import F
+from django.db.models import F, Subquery
 from django.utils import timezone
 from graphene.utils.str_converters import to_camel_case
 
 from ....core.tracing import traced_atomic_transaction
-from ....discount.utils import mark_active_catalogue_promotion_rules_as_dirty
+from ....discount.utils.promotion import mark_active_catalogue_promotion_rules_as_dirty
 from ....permission.enums import ProductPermissions
 from ....product import models
 from ....product.error_codes import ProductErrorCode, ProductVariantBulkErrorCode
 from ....warehouse import models as warehouse_models
+from ....warehouse.management import delete_stocks, stock_bulk_update
 from ....webhook.event_types import WebhookEventAsyncType
 from ....webhook.utils import get_webhooks_for_event
-from ...attribute.utils import AttributeAssignmentMixin
-from ...core.descriptions import ADDED_IN_311, ADDED_IN_312, PREVIEW_FEATURE
+from ...attribute.utils.attribute_assignment import AttributeAssignmentMixin
 from ...core.doc_category import DOC_CATEGORY_PRODUCTS
 from ...core.enums import ErrorPolicyEnum
-from ...core.mutations import BaseMutation, ModelMutation
+from ...core.mutations import BaseMutation, DeprecatedModelMutation
 from ...core.scalars import PositiveDecimal
 from ...core.types import BaseInputObjectType, NonNullList, ProductVariantBulkError
 from ...core.utils import get_duplicated_values
+from ...meta.inputs import MetadataInput
 from ...plugins.dataloaders import get_plugin_manager_promise
 from ...utils import get_user_or_app_from_context
 from ...webhook.subscription_payload import generate_pre_save_payloads
@@ -64,6 +65,7 @@ class ChannelListingUpdateInput(BaseInputObjectType):
     channel_listing = graphene.ID(required=True, description="ID of a channel listing.")
     price = PositiveDecimal(description="Price of the particular variant in channel.")
     cost_price = PositiveDecimal(description="Cost price of the variant in channel.")
+    prior_price = PositiveDecimal(description="Price of the variant before discount.")
     preorder_threshold = graphene.Int(
         description="The threshold for preorder variant in channel."
     )
@@ -102,18 +104,18 @@ class ProductVariantBulkUpdateInput(ProductVariantBulkCreateInput):
     )
     stocks = graphene.Field(
         ProductVariantStocksUpdateInput,
-        description="Stocks input." + ADDED_IN_312 + PREVIEW_FEATURE,
+        description="Stocks input.",
         required=False,
     )
 
     channel_listings = graphene.Field(
         ProductVariantChannelListingUpdateInput,
-        description="Channel listings input." + ADDED_IN_312 + PREVIEW_FEATURE,
+        description="Channel listings input.",
         required=False,
     )
 
     class Meta:
-        description = "Input fields to update product variants." + ADDED_IN_311
+        description = "Input fields to update product variants."
         doc_category = DOC_CATEGORY_PRODUCTS
 
 
@@ -150,9 +152,7 @@ class ProductVariantBulkUpdate(BaseMutation):
         )
 
     class Meta:
-        description = (
-            "Update multiple product variants." + ADDED_IN_311 + PREVIEW_FEATURE
-        )
+        description = "Update multiple product variants."
         doc_category = DOC_CATEGORY_PRODUCTS
         permissions = (ProductPermissions.MANAGE_PRODUCTS,)
         error_type_class = ProductVariantBulkError
@@ -176,6 +176,7 @@ class ProductVariantBulkUpdate(BaseMutation):
         cls,
         price,
         cost_price,
+        prior_price,
         currency_code,
         channel_id,
         variant_index,
@@ -197,6 +198,17 @@ class ProductVariantBulkUpdate(BaseMutation):
         clean_price(
             cost_price,
             "cost_price",
+            currency_code,
+            channel_id,
+            variant_index,
+            listing_index,
+            None,
+            index_error_map,
+            path_prefix,
+        )
+        clean_price(
+            prior_price,
+            "prior_price",
             currency_code,
             channel_id,
             variant_index,
@@ -245,6 +257,7 @@ class ProductVariantBulkUpdate(BaseMutation):
                 channel_listing = listings_global_id_to_instance_map[listing_id]
                 price = listing_data.get("price")
                 cost_price = listing_data.get("cost_price")
+                prior_price = listing_data.get("prior_price")
                 currency_code = channel_listing.currency
                 channel_id = channel_listing.channel_id
                 errors_count_before_prices = len(index_error_map[variant_index])
@@ -252,6 +265,7 @@ class ProductVariantBulkUpdate(BaseMutation):
                 cls.clean_prices(
                     price,
                     cost_price,
+                    prior_price,
                     currency_code,
                     channel_id,
                     variant_index,
@@ -379,7 +393,7 @@ class ProductVariantBulkUpdate(BaseMutation):
         index_error_map,
         index,
     ):
-        cleaned_input = ModelMutation.clean_input(
+        cleaned_input = DeprecatedModelMutation.clean_input(
             info, None, variant_data, input_cls=ProductVariantBulkUpdateInput
         )
 
@@ -554,12 +568,23 @@ class ProductVariantBulkUpdate(BaseMutation):
                 )
                 continue
             try:
-                metadata_list = cleaned_input.pop("metadata", None)
-                private_metadata_list = cleaned_input.pop("private_metadata", None)
+                metadata_list: list[MetadataInput] = cleaned_input.pop("metadata", None)
+                private_metadata_list: list[MetadataInput] = cleaned_input.pop(
+                    "private_metadata", None
+                )
+
+                metadata_collection = cls.create_metadata_from_graphql_input(
+                    metadata_list, error_field_name="metadata"
+                )
+                private_metadata_collection = cls.create_metadata_from_graphql_input(
+                    private_metadata_list,
+                    error_field_name="private_metadata",
+                )
+
                 instance = cleaned_input.pop("id")
                 instance = cls.construct_instance(instance, cleaned_input)
                 cls.validate_and_update_metadata(
-                    instance, metadata_list, private_metadata_list
+                    instance, metadata_collection, private_metadata_collection
                 )
                 cls.clean_instance(info, instance)
                 instances_data_and_errors_list.append(
@@ -612,6 +637,7 @@ class ProductVariantBulkUpdate(BaseMutation):
                     # value will be calculated asynchronously in the celery task
                     discounted_price_amount=listing_data["price"],
                     cost_price_amount=listing_data.get("cost_price"),
+                    prior_price_amount=listing_data.get("prior_price"),
                     currency=listing_data["channel"].currency_code,
                     preorder_quantity_threshold=listing_data.get("preorder_threshold"),
                 )
@@ -632,11 +658,13 @@ class ProductVariantBulkUpdate(BaseMutation):
                     listing.discounted_price_amount = listing_data["price"]
                 if "cost_price" in listing_data:
                     listing.cost_price_amount = listing_data["cost_price"]
+                if "prior_price" in listing_data:
+                    listing.prior_price_amount = listing_data["prior_price"]
                 listings_to_update.append(listing)
 
     @classmethod
     @traced_atomic_transaction()
-    def save_variants(cls, variants_data_with_errors_list):
+    def save_variants(cls, variants_data_with_errors_list, error_policy):
         variants_to_update: list = []
         stocks_to_create: list = []
         stocks_to_update: list = []
@@ -684,10 +712,21 @@ class ProductVariantBulkUpdate(BaseMutation):
                 "metadata",
                 "private_metadata",
                 "external_reference",
+                "preorder_end_date",
+                "preorder_global_threshold",
+                "is_preorder",
             ],
         )
-        warehouse_models.Stock.objects.bulk_create(stocks_to_create)
-        warehouse_models.Stock.objects.bulk_update(stocks_to_update, ["quantity"])
+
+        if error_policy == ErrorPolicyEnum.REJECT_EVERYTHING.value:
+            warehouse_models.Stock.objects.bulk_create(stocks_to_create)
+        else:
+            warehouse_models.Stock.objects.bulk_create(
+                stocks_to_create, ignore_conflicts=True
+            )
+        if stocks_to_update:
+            stock_bulk_update(stocks_to_update, ["quantity"])
+
         models.ProductVariantChannelListing.objects.bulk_create(listings_to_create)
         models.ProductVariantChannelListing.objects.bulk_update(
             listings_to_update,
@@ -695,12 +734,22 @@ class ProductVariantBulkUpdate(BaseMutation):
                 "price_amount",
                 "discounted_price_amount",
                 "cost_price_amount",
+                "prior_price_amount",
                 "preorder_quantity_threshold",
             ],
         )
-        warehouse_models.Stock.objects.filter(id__in=stocks_to_remove).delete()
+        if stocks_to_remove:
+            delete_stocks(stocks_to_remove)
+
+        locked_ids = (
+            models.ProductVariantChannelListing.objects.filter(
+                id__in=listings_to_remove
+            )
+            .select_for_update(of=("self",))
+            .order_by("pk")
+        )
         models.ProductVariantChannelListing.objects.filter(
-            id__in=listings_to_remove
+            id__in=Subquery(locked_ids.values("pk"))
         ).delete()
 
     @classmethod
@@ -803,7 +852,7 @@ class ProductVariantBulkUpdate(BaseMutation):
         )
 
         # check error policy
-        if any([bool(error) for error in index_error_map.values()]):
+        if any(bool(error) for error in index_error_map.values()):
             if error_policy == ErrorPolicyEnum.REJECT_EVERYTHING.value:
                 results = get_results(instances_data_with_errors_list, True)
                 return ProductVariantBulkUpdate(count=0, results=results)
@@ -814,7 +863,7 @@ class ProductVariantBulkUpdate(BaseMutation):
                         data["instance"] = None
 
         # save all objects
-        cls.save_variants(instances_data_with_errors_list)
+        cls.save_variants(instances_data_with_errors_list, error_policy)
 
         # prepare and return data
         results = get_results(instances_data_with_errors_list)

@@ -3,12 +3,15 @@ from django.core.exceptions import ValidationError
 
 from ....core.tracing import traced_atomic_transaction
 from ....discount.models import VoucherCode
-from ....discount.utils import release_voucher_code_usage
+from ....discount.utils.voucher import release_voucher_code_usage
 from ....order import OrderStatus, models
+from ....order.actions import call_order_event
 from ....order.error_codes import OrderErrorCode
+from ....payment.models import Payment, TransactionItem
 from ....permission.enums import OrderPermissions
+from ....webhook.event_types import WebhookEventAsyncType
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_310
+from ...core.context import SyncWebhookControlContext
 from ...core.mutations import (
     ModelDeleteWithRestrictedChannelAccessMutation,
     ModelWithExtRefMutation,
@@ -25,7 +28,7 @@ class DraftOrderDelete(
         id = graphene.ID(required=False, description="ID of a product to delete.")
         external_reference = graphene.String(
             required=False,
-            description=f"External ID of a product to delete. {ADDED_IN_310}",
+            description="External ID of a product to delete.",
         )
 
     class Meta:
@@ -47,6 +50,18 @@ class DraftOrderDelete(
                     )
                 }
             )
+        if (
+            Payment.objects.filter(order_id=instance.pk).exists()
+            or TransactionItem.objects.filter(order_id=instance.pk).exists()
+        ):
+            raise ValidationError(
+                {
+                    "id": ValidationError(
+                        "Cannot delete order with payments or transactions attached to it.",
+                        code=OrderErrorCode.INVALID.value,
+                    )
+                }
+            )
 
     @classmethod
     def perform_mutation(cls, _root, info: ResolveInfo, /, **data):
@@ -54,7 +69,11 @@ class DraftOrderDelete(
         manager = get_plugin_manager_promise(info.context).get()
         with traced_atomic_transaction():
             response = super().perform_mutation(_root, info, **data)
-            cls.call_event(manager.draft_order_deleted, order)
+            call_order_event(
+                manager,
+                WebhookEventAsyncType.DRAFT_ORDER_DELETED,
+                order,
+            )
         return response
 
     @classmethod
@@ -67,3 +86,8 @@ class DraftOrderDelete(
             if voucher_code := VoucherCode.objects.filter(code=code).first():
                 voucher = voucher_code.voucher
                 release_voucher_code_usage(voucher_code, voucher, None)
+
+    @classmethod
+    def success_response(cls, order):
+        """Return a success response."""
+        return cls(order=SyncWebhookControlContext(order), errors=[])

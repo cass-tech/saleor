@@ -205,12 +205,16 @@ def test_query_channel_returns_countries_attached_to_shipping_zone(
     # then
     content = get_graphql_content(response)
     channel_data = content["data"]["channel"]
-    assert set([country["code"] for country in channel_data["countries"]]) == set(
-        ["PL", "DE", "FR"]
-    )
-    assert set([country["country"] for country in channel_data["countries"]]) == set(
-        ["Poland", "Germany", "France"]
-    )
+    assert {country["code"] for country in channel_data["countries"]} == {
+        "PL",
+        "DE",
+        "FR",
+    }
+    assert {country["country"] for country in channel_data["countries"]} == {
+        "Poland",
+        "Germany",
+        "France",
+    }
 
 
 def test_query_channel_returns_supported_shipping_methods(
@@ -307,6 +311,8 @@ QUERY_CHANNEL_ORDER_SETTINGS = """
                 deleteExpiredOrdersAfter
                 allowUnpaidOrders
                 includeDraftOrderInVoucherUsage
+                draftOrderLinePriceFreezePeriod
+                useLegacyLineDiscountPropagation
             }
         }
     }
@@ -363,6 +369,15 @@ def test_query_channel_order_settings_as_staff_user(
         channel_data["orderSettings"]["includeDraftOrderInVoucherUsage"]
         == channel_USD.include_draft_order_in_voucher_usage
     )
+    assert (
+        channel_data["orderSettings"]["draftOrderLinePriceFreezePeriod"]
+        == channel_USD.draft_order_line_price_freeze_period
+    )
+
+    assert (
+        channel_data["orderSettings"]["useLegacyLineDiscountPropagation"]
+        == channel_USD.use_legacy_line_discount_propagation_for_order
+    )
 
 
 def test_query_channel_order_settings_as_app(
@@ -409,6 +424,14 @@ def test_query_channel_order_settings_as_app(
         channel_data["orderSettings"]["includeDraftOrderInVoucherUsage"]
         == channel_USD.include_draft_order_in_voucher_usage
     )
+    assert (
+        channel_data["orderSettings"]["draftOrderLinePriceFreezePeriod"]
+        == channel_USD.draft_order_line_price_freeze_period
+    )
+    assert (
+        channel_data["orderSettings"]["useLegacyLineDiscountPropagation"]
+        == channel_USD.use_legacy_line_discount_propagation_for_order
+    )
 
 
 def test_query_channel_order_settings_as_staff_user_no_permission(
@@ -452,6 +475,7 @@ QUERY_CHANNEL_CHECKOUT_SETTINGS = """
             id
             checkoutSettings {
                 useLegacyErrorFlow
+                automaticallyCompleteFullyPaidCheckouts
             }
         }
     }
@@ -463,7 +487,14 @@ def test_query_channel_checkout_settings_as_staff_user(
 ):
     # given
     channel_USD.use_legacy_error_flow_for_checkout = False
-    channel_USD.save()
+    channel_USD.automatically_complete_fully_paid_checkouts = True
+    channel_USD.save(
+        update_fields=[
+            "use_legacy_error_flow_for_checkout",
+            "automatically_complete_fully_paid_checkouts",
+        ]
+    )
+
     channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
     variables = {"id": channel_id}
 
@@ -481,6 +512,10 @@ def test_query_channel_checkout_settings_as_staff_user(
     assert (
         channel_data["checkoutSettings"]["useLegacyErrorFlow"]
         == channel_USD.use_legacy_error_flow_for_checkout
+    )
+    assert (
+        channel_data["checkoutSettings"]["automaticallyCompleteFullyPaidCheckouts"]
+        == channel_USD.automatically_complete_fully_paid_checkouts
     )
 
 
@@ -507,6 +542,10 @@ def test_query_channel_checkout_settings_as_app(
     assert (
         channel_data["checkoutSettings"]["useLegacyErrorFlow"]
         == channel_USD.use_legacy_error_flow_for_checkout
+    )
+    assert (
+        channel_data["checkoutSettings"]["automaticallyCompleteFullyPaidCheckouts"]
+        == channel_USD.automatically_complete_fully_paid_checkouts
     )
 
 
@@ -550,7 +589,13 @@ def test_query_channel_checkout_settings_with_manage_checkouts(
 ):
     # given
     channel_USD.use_legacy_error_flow_for_checkout = False
-    channel_USD.save()
+    channel_USD.automatically_complete_fully_paid_checkouts = True
+    channel_USD.save(
+        update_fields=[
+            "use_legacy_error_flow_for_checkout",
+            "automatically_complete_fully_paid_checkouts",
+        ]
+    )
     channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
     variables = {"id": channel_id}
 
@@ -568,6 +613,10 @@ def test_query_channel_checkout_settings_with_manage_checkouts(
     assert (
         channel_data["checkoutSettings"]["useLegacyErrorFlow"]
         == channel_USD.use_legacy_error_flow_for_checkout
+    )
+    assert (
+        channel_data["checkoutSettings"]["automaticallyCompleteFullyPaidCheckouts"]
+        == channel_USD.automatically_complete_fully_paid_checkouts
     )
 
 

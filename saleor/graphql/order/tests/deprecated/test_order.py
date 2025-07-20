@@ -24,11 +24,11 @@ from ....tests.utils import get_graphql_content
 
 def assert_proper_webhook_called_once(order, status, draft_mock, order_mock):
     if status == OrderStatus.DRAFT:
-        draft_mock.assert_called_once_with(order)
+        draft_mock.assert_called_once_with(order, webhooks=set())
         order_mock.assert_not_called()
     else:
         draft_mock.assert_not_called()
-        order_mock.assert_called_once_with(order)
+        order_mock.assert_called_once_with(order, webhooks=set())
 
 
 QUERY_ORDER_TOTAL = """
@@ -63,9 +63,7 @@ def test_orders_total(
     # then
     amount = str(content["data"]["ordersTotal"]["gross"]["amount"])
     assert Money(amount, "USD") == order.total.gross
-    assert any(
-        [str(warning.message) == DEPRECATION_WARNING_MESSAGE for warning in warns]
-    )
+    assert any(str(warning.message) == DEPRECATION_WARNING_MESSAGE for warning in warns)
 
 
 ORDER_LINE_DELETE_MUTATION = """
@@ -283,9 +281,9 @@ def test_order_fulfill_old_line_id(
         fulfillment_lines_for_warehouses,
         ANY,
         site_settings,
-        True,
+        notify_customer=True,
         allow_stock_to_be_exceeded=False,
-        approved=fulfillment_auto_approve,
+        auto_approved=fulfillment_auto_approve,
         tracking_number="",
     )
 
@@ -321,7 +319,7 @@ mutation OrderFulfillmentRefundProducts(
 """
 
 
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_fulfillment_refund_products_order_lines_by_old_id(
     mocked_refund,
     staff_api_client,
@@ -430,7 +428,7 @@ mutation OrderFulfillmentReturnProducts(
 """
 
 
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 def test_fulfillment_return_products_order_lines_by_old_line_id(
     mocked_refund,
     staff_api_client,
@@ -602,7 +600,7 @@ def test_update_order_line_discount_old_id(
 
     line_price_before_discount = line_to_discount.unit_price
 
-    value = Decimal("5")
+    value = Decimal(5)
     reason = "New reason for unit discount"
     variables = {
         "orderLineId": graphene.Node.to_global_id("OrderLine", line_to_discount.old_id),
@@ -623,7 +621,7 @@ def test_update_order_line_discount_old_id(
     order.refresh_from_db()
     order_discount = order.discounts.get()
     order_discount_amount = order_discount.amount
-    base_shipping = order.base_shipping_price
+    base_shipping = order.undiscounted_base_shipping_price
     discount_applied_to_lines = order_discount_amount - (
         base_shipping - order.shipping_price.gross
     )
@@ -666,7 +664,9 @@ def test_update_order_line_discount_old_id(
 
     assert discount_data["value"] == str(value)
     assert discount_data["value_type"] == DiscountValueTypeEnum.FIXED.value
-    assert discount_data["amount_value"] == str(unit_discount.amount)
+    assert discount_data["amount_value"] == str(
+        quantize_price(unit_discount.amount, order.currency)
+    )
 
 
 ORDER_LINE_DISCOUNT_REMOVE = """
@@ -674,6 +674,11 @@ mutation OrderLineDiscountRemove($orderLineId: ID!){
   orderLineDiscountRemove(orderLineId: $orderLineId){
     orderLine{
       id
+      unitPrice{
+        net{
+          amount
+        }
+      }
     }
     errors{
       field

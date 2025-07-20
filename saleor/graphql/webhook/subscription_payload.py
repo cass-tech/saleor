@@ -1,6 +1,6 @@
+import datetime
 from collections.abc import Iterable
-from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Any
 
 from celery.utils.log import get_task_logger
 from django.conf import settings
@@ -27,9 +27,9 @@ def initialize_request(
     requestor=None,
     sync_event=False,
     allow_replica=False,
-    event_type: Optional[str] = None,
-    request_time: Optional[datetime] = None,
-    dataloaders: Optional[dict] = None,
+    event_type: str | None = None,
+    request_time: datetime.datetime | None = None,
+    dataloaders: dict | None = None,
 ) -> SaleorContext:
     """Prepare a request object for webhook subscription.
 
@@ -65,13 +65,26 @@ def get_event_payload(event):
     return event
 
 
-def generate_payload_from_subscription(
+def _process_payload_instance(payload_instance):
+    """Process a payload instance to extract data."""
+    for payload_key in payload_instance.data:
+        extracted_payload = get_event_payload(payload_instance.data.get(payload_key))
+        payload_instance.data[payload_key] = extracted_payload
+    if "event" in payload_instance.data or not payload_instance.data:
+        event_payload = payload_instance.data.get("event") or {}
+    else:
+        event_payload = {"data": payload_instance.data}
+
+    return event_payload
+
+
+def generate_payload_promise_from_subscription(
     event_type: str,
     subscribable_object,
     subscription_query: str,
     request: SaleorContext,
-    app: Optional[App] = None,
-) -> Optional[dict[str, Any]]:
+    app: App | None = None,
+) -> Promise[dict[str, Any] | None]:
     """Generate webhook payload from subscription query.
 
     It uses a graphql's engine to build payload by using the same logic as response.
@@ -81,7 +94,91 @@ def generate_payload_from_subscription(
     subscribable_object: is an object which have a dedicated own type in Subscription
     definition.
     subscription_query: query used to prepare a payload via graphql engine.
-    context: A dummy request used to share context between apps in order to use
+    request: A dummy request used to share context between apps in order to use
+    dataloaders benefits.
+    app: the owner of the given payload. Required in case when webhook contains
+    protected fields.
+    return: A payload ready to send via webhook. None if the function was not able to
+    generate a payload
+    """
+
+    from ..api import schema
+    from ..context import get_context_value
+
+    graphql_backend = get_default_backend()
+    ast = parse(subscription_query)
+    document = graphql_backend.document_from_string(
+        schema,
+        ast,
+    )
+    app_id = app.pk if app else None
+    request.app = app
+    results_promise = document.execute(
+        allow_subscriptions=True,
+        root=(event_type, subscribable_object),
+        context=get_context_value(request),
+        return_promise=True,
+    )
+
+    def return_payload_promise(
+        results, app_id=app_id, subscription_query=subscription_query
+    ):
+        if hasattr(results, "errors"):
+            logger.warning(
+                "Unable to build a payload for subscription.\nerror: %s",
+                str(results.errors),
+                extra={"query": subscription_query, "app": app_id},
+            )
+            return None
+
+        payload: list[Any] = []
+        results.subscribe(payload.append)
+
+        if not payload:
+            logger.warning(
+                "Subscription did not return a payload.",
+                extra={"query": subscription_query, "app": app_id},
+            )
+            return None
+
+        payload_instance = payload[0]
+        event_payload = _process_payload_instance(payload_instance)
+
+        def check_errors(event_payload, payload_instance=payload_instance):
+            if payload_instance.errors:
+                event_payload["errors"] = [
+                    format_error(error, (GraphQLError, PermissionDenied))
+                    for error in payload_instance.errors
+                ]
+            return event_payload
+
+        if isinstance(event_payload, Promise):
+            return event_payload.then(check_errors)
+        return check_errors(event_payload)
+
+    if isinstance(results_promise, Promise):
+        return results_promise.then(return_payload_promise)
+    result = return_payload_promise(results_promise)
+    return Promise.resolve(result)
+
+
+def generate_payload_from_subscription(
+    event_type: str,
+    subscribable_object,
+    subscription_query: str,
+    request: SaleorContext,
+    app: App | None = None,
+) -> dict[str, Any] | None:
+    """Generate webhook payload from subscription query.
+
+    It uses a graphql's engine to build payload by using the same logic as response.
+    As an input it expects given event type and object and the query which will be
+    used to resolve a payload.
+    event_type: is an event which will be triggered.
+    subscribable_object: is an object which have a dedicated own type in Subscription
+    definition.
+    subscription_query: query used to prepare a payload via graphql engine.
+    request: A dummy request used to share context between apps in order to use
     dataloaders benefits.
     app: the owner of the given payload. Required in case when webhook contains
     protected fields.
@@ -106,8 +203,8 @@ def generate_payload_from_subscription(
     )
     if hasattr(results, "errors"):
         logger.warning(
-            "Unable to build a payload for subscription. \n"
-            "error: %s" % str(results.errors),
+            "Unable to build a payload for subscription. Error: %s",
+            str(results.errors),
             extra={"query": subscription_query, "app": app_id},
         )
         return None
@@ -123,8 +220,7 @@ def generate_payload_from_subscription(
         return None
 
     payload_instance = payload[0]
-    event_payload = get_event_payload(payload_instance.data.get("event"))
-
+    event_payload = _process_payload_instance(payload_instance)
     if payload_instance.errors:
         event_payload["errors"] = [
             format_error(error, (GraphQLError, PermissionDenied))
@@ -142,8 +238,8 @@ def generate_pre_save_payloads(
     webhooks: Iterable[Webhook],
     instances: Iterable[models.Model],
     event_type: str,
-    requestor: Union[User, App, None],
-    request_time: datetime,
+    requestor: User | App | None,
+    request_time: datetime.datetime,
 ):
     if not settings.ENABLE_LIMITING_WEBHOOKS_FOR_IDENTICAL_PAYLOADS:
         return {}

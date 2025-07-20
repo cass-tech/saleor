@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Literal, Union
+from typing import Literal
 from unittest.mock import Mock, patch
 
 import pytest
@@ -9,12 +9,26 @@ from freezegun import freeze_time
 from graphene import Node
 from prices import Money, TaxedMoney
 
-from ...checkout.utils import add_promo_code_to_checkout, set_external_shipping_id
+from ...checkout.utils import (
+    add_promo_code_to_checkout,
+    assign_external_shipping_to_checkout,
+)
 from ...core.prices import quantize_price
-from ...core.taxes import TaxData, TaxLineData, zero_taxed_money
+from ...core.taxes import (
+    TaxData,
+    TaxDataError,
+    TaxDataErrorMessage,
+    TaxLineData,
+    zero_taxed_money,
+)
+from ...graphql.core.utils import to_global_id_or_none
 from ...plugins import PLUGIN_IDENTIFIER_PREFIX
+from ...plugins.avatax.plugin import DeprecatedAvataxPlugin
+from ...plugins.avatax.tests.conftest import plugin_configuration  # noqa: F401
 from ...plugins.manager import get_plugins_manager
 from ...plugins.tests.sample_plugins import PluginSample
+from ...product.models import ProductVariantChannelListing
+from ...shipping.interface import ShippingMethodData
 from ...tax import TaxCalculationStrategy
 from ...tax.calculations.checkout import update_checkout_prices_with_flat_rates
 from ..base_calculations import (
@@ -26,19 +40,15 @@ from ..calculations import (
     _calculate_and_add_tax,
     _set_checkout_base_prices,
     fetch_checkout_data,
+    logger,
 )
 from ..fetch import CheckoutLineInfo, fetch_checkout_info, fetch_checkout_lines
 
 
 @pytest.fixture
-def checkout_lines(checkout_with_items):
-    return checkout_with_items.lines.all()
-
-
-@pytest.fixture
 def tax_data(checkout_with_items, checkout_lines):
     checkout = checkout_with_items
-    tax_rate = Decimal("23")
+    tax_rate = Decimal(23)
     net = Decimal("10.000")
     gross = Decimal("12.300")
     lines = checkout_lines
@@ -80,13 +90,53 @@ def test_apply_tax_data(checkout_with_items, checkout_lines, tax_data):
         quantize_price(tax_data.shipping_price_gross_amount, checkout.currency)
     )
 
-    for line, tax_line in zip(lines, tax_data.lines):
+    for line, tax_line in zip(lines, tax_data.lines, strict=False):
         assert str(line.total_price.net.amount) == str(
             quantize_price(tax_line.total_net_amount, checkout.currency)
         )
         assert str(line.total_price.gross.amount) == str(
             quantize_price(tax_line.total_gross_amount, checkout.currency)
         )
+
+
+def test_apply_tax_data_tax_rate_matches(checkout_with_items, checkout_lines):
+    # given
+    net_amount = Decimal("10.000")
+    tax_rate = Decimal("8.875")
+    expected_tax_rate = Decimal("0.08875")
+    gross_amount = net_amount + (net_amount * tax_rate / 100)
+    tax_data = TaxData(
+        shipping_price_net_amount=net_amount,
+        shipping_price_gross_amount=gross_amount,
+        shipping_tax_rate=tax_rate,
+        lines=[
+            TaxLineData(
+                total_net_amount=net_amount,
+                total_gross_amount=gross_amount,
+                tax_rate=tax_rate,
+            )
+            for _ in checkout_lines
+        ],
+    )
+
+    checkout = checkout_with_items
+    lines = checkout_lines
+
+    # when
+    _apply_tax_data(
+        checkout,
+        [
+            Mock(spec=CheckoutLineInfo, line=line, variant=line.variant)
+            for line in lines
+        ],
+        tax_data,
+    )
+
+    # then
+    assert checkout.shipping_tax_rate == expected_tax_rate
+
+    for line in lines:
+        assert line.tax_rate == expected_tax_rate
 
 
 @pytest.fixture
@@ -108,7 +158,7 @@ DISCOUNT = Decimal("1.5")
 
 
 def get_checkout_taxed_prices_data(
-    obj: Union[TaxData, TaxLineData],
+    obj: TaxData | TaxLineData,
     attr: Literal["total", "shipping_price"],
     currency: str,
 ) -> TaxedMoney:
@@ -120,7 +170,7 @@ def get_checkout_taxed_prices_data(
 
 
 def get_taxed_money(
-    obj: Union[TaxData, TaxLineData],
+    obj: TaxData | TaxLineData,
     attr: Literal["total", "shipping_price"],
     currency: str,
 ) -> TaxedMoney:
@@ -152,7 +202,8 @@ def test_fetch_checkout_data_plugins(
                 line.tax_rate / 100,
             )
             for line in tax_data.lines
-        ]
+        ],
+        strict=False,
     )
     plugins_manager.calculate_checkout_line_total = Mock(side_effect=totals * 3)
     plugins_manager.get_checkout_line_tax_rate = Mock(side_effect=tax_rates)
@@ -176,11 +227,13 @@ def test_fetch_checkout_data_plugins(
     )
 
     # when
-    fetch_checkout_data(**fetch_kwargs)
+    fetch_checkout_data(**fetch_kwargs, allow_sync_webhooks=True)
 
     # then
     checkout_with_items.refresh_from_db()
-    for checkout_line, tax_line in zip(checkout_with_items.lines.all(), tax_data.lines):
+    for checkout_line, tax_line in zip(
+        checkout_with_items.lines.all(), tax_data.lines, strict=False
+    ):
         total_price = get_taxed_money(tax_line, "total", currency)
         assert checkout_line.total_price == total_price
         assert checkout_line.tax_rate == tax_line.tax_rate / 100
@@ -191,6 +244,68 @@ def test_fetch_checkout_data_plugins(
     assert checkout_with_items.total == subtotal + shipping_price
 
 
+@freeze_time("2020-12-12 12:00:00")
+@patch("saleor.checkout.calculations._apply_tax_data")
+def test_fetch_checkout_data_plugins_allow_sync_webhooks_set_to_false(
+    _mocked_from_app,
+    plugins_manager,
+    fetch_kwargs,
+    checkout_with_items,
+):
+    # given
+    checkout_with_items.price_expiration = timezone.now()
+    checkout_with_items.save(update_fields=["price_expiration"])
+
+    currency = checkout_with_items.currency
+    plugins_manager.get_taxes_for_checkout = Mock(return_value=None)
+
+    previous_subtotal = checkout_with_items.subtotal
+    previous_shipping_price = checkout_with_items.shipping_price
+    previous_shipping_tax_rate = checkout_with_items.shipping_tax_rate
+    previous_total = checkout_with_items.total
+
+    plugins_manager.calculate_checkout_line_total = Mock(
+        return_value=zero_taxed_money(currency)
+    )
+    plugins_manager.get_checkout_line_tax_rate = Mock(return_value=Decimal("0.23"))
+
+    plugins_manager.calculate_checkout_shipping = Mock(
+        return_value=zero_taxed_money(currency)
+    )
+
+    plugins_manager.get_checkout_shipping_tax_rate = Mock(return_value=Decimal("0.23"))
+    plugins_manager.calculate_checkout_subtotal = Mock(
+        return_value=zero_taxed_money(currency)
+    )
+    plugins_manager.calculate_checkout_total = Mock(
+        return_value=zero_taxed_money(currency)
+    )
+
+    checkout_info = fetch_kwargs["checkout_info"]
+    assert (
+        checkout_info.tax_configuration.tax_calculation_strategy
+        == TaxCalculationStrategy.TAX_APP
+    )
+
+    # when
+    fetch_checkout_data(**fetch_kwargs, allow_sync_webhooks=False)
+
+    # then
+    assert checkout_with_items.subtotal == previous_subtotal
+    assert checkout_with_items.shipping_price == previous_shipping_price
+    assert checkout_with_items.shipping_tax_rate == previous_shipping_tax_rate
+    assert checkout_with_items.total == previous_total
+
+    plugins_manager.calculate_checkout_line_total.assert_not_called()
+    plugins_manager.get_checkout_line_tax_rate.assert_not_called()
+    plugins_manager.calculate_checkout_shipping.assert_not_called()
+    plugins_manager.get_checkout_shipping_tax_rate.assert_not_called()
+    plugins_manager.get_checkout_shipping_tax_rate.assert_not_called()
+    plugins_manager.calculate_checkout_subtotal.assert_not_called()
+    plugins_manager.calculate_checkout_total.assert_not_called()
+
+
+@pytest.mark.parametrize("allow_sync_webhooks", [True, False])
 @patch(
     "saleor.checkout.calculations.update_checkout_prices_with_flat_rates",
     wraps=update_checkout_prices_with_flat_rates,
@@ -198,6 +313,7 @@ def test_fetch_checkout_data_plugins(
 @pytest.mark.parametrize("prices_entered_with_tax", [True, False])
 def test_fetch_checkout_data_flat_rates(
     mocked_update_checkout_prices_with_flat_rates,
+    allow_sync_webhooks,
     checkout_with_items_and_shipping,
     fetch_kwargs,
     prices_entered_with_tax,
@@ -221,7 +337,7 @@ def test_fetch_checkout_data_flat_rates(
     )
 
     # when
-    fetch_checkout_data(**fetch_kwargs)
+    fetch_checkout_data(**fetch_kwargs, allow_sync_webhooks=allow_sync_webhooks)
     checkout.refresh_from_db()
     line = checkout.lines.first()
 
@@ -229,6 +345,75 @@ def test_fetch_checkout_data_flat_rates(
     mocked_update_checkout_prices_with_flat_rates.assert_called_once()
     assert line.tax_rate == Decimal("0.2300")
     assert checkout.shipping_tax_rate == Decimal("0.2300")
+
+
+@pytest.mark.parametrize("allow_sync_webhooks", [True, False])
+@patch(
+    "saleor.checkout.calculations.update_checkout_prices_with_flat_rates",
+    wraps=update_checkout_prices_with_flat_rates,
+)
+@pytest.mark.parametrize("prices_entered_with_tax", [True, False])
+def test_fetch_checkout_data_flat_rates_with_weighted_shipping_tax(
+    mocked_update_checkout_prices_with_flat_rates,
+    allow_sync_webhooks,
+    checkout_with_items_and_shipping,
+    address,
+    prices_entered_with_tax,
+    tax_classes,
+    plugins_manager,
+):
+    # given
+    checkout = checkout_with_items_and_shipping
+
+    tc = checkout.channel.tax_configuration
+    tc.country_exceptions.all().delete()
+    tc.prices_entered_with_tax = prices_entered_with_tax
+    tc.tax_calculation_strategy = TaxCalculationStrategy.FLAT_RATES
+    tc.use_weighted_tax_for_shipping = True
+    tc.save()
+
+    country_code = checkout.shipping_address.country.code
+    first_line = checkout.lines.first()
+    second_line = checkout.lines.last()
+    first_tax_class = first_line.variant.product.tax_class
+    first_tax_class.country_rates.filter(country=country_code).update(rate=5)
+    first_line.variant.product.tax_class = first_tax_class
+    first_line.variant.product.save()
+
+    second_tax_class = tax_classes[0]
+    second_tax_class.country_rates.filter(country=country_code).update(rate=60)
+    second_line.variant.product.tax_class = second_tax_class
+    second_line.variant.product.save()
+
+    third_tax_class = tax_classes[1]
+    third_tax_class.country_rates.filter(country=country_code).update(rate=223)
+    checkout.shipping_method.tax_class = third_tax_class
+    checkout.shipping_method.save()
+
+    lines, _ = fetch_checkout_lines(checkout_with_items_and_shipping)
+    checkout_info = fetch_checkout_info(
+        checkout_with_items_and_shipping, lines, plugins_manager
+    )
+
+    # when
+    fetch_checkout_data(
+        checkout_info,
+        plugins_manager,
+        lines,
+        allow_sync_webhooks=allow_sync_webhooks,
+        address=checkout.shipping_address,
+    )
+
+    # then
+    checkout.refresh_from_db()
+    lines = checkout.lines.all()
+
+    mocked_update_checkout_prices_with_flat_rates.assert_called_once()
+    total_weighted = sum(line.total_price.net.amount * line.tax_rate for line in lines)
+
+    assert checkout.shipping_tax_rate == (
+        total_weighted / sum(line.total_price.net.amount for line in lines)
+    ).quantize(Decimal("0.0001"))
 
 
 @patch(
@@ -401,7 +586,9 @@ def test_fetch_checkout_data_webhooks_success(
         tax_data, "shipping_price", currency
     )
     assert checkout_with_items.shipping_tax_rate == tax_data.shipping_tax_rate / 100
-    for checkout_line, tax_line in zip(checkout_with_items.lines.all(), tax_data.lines):
+    for checkout_line, tax_line in zip(
+        checkout_with_items.lines.all(), tax_data.lines, strict=False
+    ):
         assert checkout_line.total_price == get_taxed_money(tax_line, "total", currency)
         assert checkout_line.tax_rate == tax_line.tax_rate / 100
 
@@ -509,8 +696,7 @@ def test_fetch_checkout_prices_when_tax_exemption_and_not_include_taxes_in_price
 
     # then
     one_line_total_prices = [
-        calculate_base_line_total_price(line_info, checkout_info.channel)
-        for line_info in lines_info
+        calculate_base_line_total_price(line_info) for line_info in lines_info
     ]
     all_lines_total_price = sum(one_line_total_prices, zero_taxed_money(currency))
     shipping_price = base_checkout_delivery_price(checkout_info, lines_info)
@@ -577,13 +763,16 @@ def test_fetch_checkout_data_calls_tax_app(
     mock_apply_tax_data,
     mock_get_taxes,
     mock_calculate_checkout_total,
-    fetch_kwargs,
     checkout_with_items,
+    tax_data_response,
 ):
     # given
+
     checkout = checkout_with_items
     checkout.price_expiration = timezone.now()
     checkout.save()
+
+    mock_get_taxes.return_value = tax_data_response
 
     checkout.channel.tax_configuration.tax_app_id = "test.app"
     checkout.channel.tax_configuration.save()
@@ -596,6 +785,7 @@ def test_fetch_checkout_data_calls_tax_app(
         "manager": manager,
         "lines": lines_info,
         "address": checkout.shipping_address or checkout.billing_address,
+        "allow_sync_webhooks": True,
     }
 
     # when
@@ -604,6 +794,61 @@ def test_fetch_checkout_data_calls_tax_app(
     # then
     mock_get_taxes.assert_called_once()
     mock_apply_tax_data.assert_called_once()
+    mock_calculate_checkout_total.assert_not_called()
+
+
+@freeze_time()
+@patch("saleor.plugins.manager.PluginsManager.calculate_checkout_total")
+@patch("saleor.plugins.manager.PluginsManager.get_taxes_for_checkout")
+@patch("saleor.checkout.calculations._apply_tax_data")
+@override_settings(PLUGINS=["saleor.plugins.tests.sample_plugins.PluginSample"])
+def test_fetch_checkout_data_calls_tax_app_when_allow_sync_webhooks_set_to_false(
+    mock_apply_tax_data,
+    mock_get_taxes,
+    mock_calculate_checkout_total,
+    checkout_with_items,
+):
+    # given
+
+    checkout = checkout_with_items
+    checkout.price_expiration = timezone.now()
+    checkout.save()
+
+    previous_subtotal = checkout_with_items.subtotal
+    previous_shipping_price = checkout_with_items.shipping_price
+    previous_shipping_tax_rate = checkout_with_items.shipping_tax_rate
+    previous_total = checkout_with_items.total
+
+    checkout.channel.tax_configuration.tax_app_id = "test.app"
+    checkout.channel.tax_configuration.save()
+
+    manager = get_plugins_manager(allow_replica=False)
+    lines_info, _ = fetch_checkout_lines(checkout)
+
+    checkout_info = fetch_checkout_info(checkout, lines_info, manager)
+    fetch_kwargs = {
+        "checkout_info": checkout_info,
+        "manager": manager,
+        "lines": lines_info,
+        "address": checkout.shipping_address or checkout.billing_address,
+        "allow_sync_webhooks": False,
+    }
+    assert (
+        checkout_info.tax_configuration.tax_calculation_strategy
+        == TaxCalculationStrategy.TAX_APP
+    )
+
+    # when
+    fetch_checkout_data(**fetch_kwargs)
+
+    # then
+    assert checkout_with_items.subtotal == previous_subtotal
+    assert checkout_with_items.shipping_price == previous_shipping_price
+    assert checkout_with_items.shipping_tax_rate == previous_shipping_tax_rate
+    assert checkout_with_items.total == previous_total
+
+    mock_apply_tax_data.assert_not_called()
+    mock_get_taxes.assert_not_called()
     mock_calculate_checkout_total.assert_not_called()
 
 
@@ -643,19 +888,22 @@ def test_external_shipping_method_called_only_once_during_tax_calculations(
     mock_send_webhook_request_sync,
     checkout_with_single_item,
     settings,
-    tax_app_with_subscription_webhooks,
+    tax_app,
     shipping_app_with_subscription,
     address,
 ):
     # given
     external_method_id = "method-1-from-shipping-app"
+    shipping_name = "Shipping app method 1"
+    shipping_price = Decimal(10)
+    currency = "USD"
     mock_send_webhook_request_sync.side_effect = (
         [
             {
-                "amount": "1337.0",
-                "currency": "USD",
+                "amount": shipping_price,
+                "currency": currency,
                 "id": external_method_id,
-                "name": "Shipping app method 1",
+                "name": shipping_name,
             }
         ],
         {
@@ -670,12 +918,19 @@ def test_external_shipping_method_called_only_once_during_tax_calculations(
     external_shipping_method_id = Node.to_global_id(
         "app", f"{shipping_app_with_subscription.id}:{external_method_id}"
     )
+    external_shipping_method = ShippingMethodData(
+        id=external_shipping_method_id,
+        name=shipping_name,
+        price=Money(shipping_price, currency),
+    )
 
     settings.PLUGINS = ["saleor.plugins.webhook.plugin.WebhookPlugin"]
     manager = get_plugins_manager(allow_replica=False)
 
     checkout_with_single_item.shipping_address = address
-    set_external_shipping_id(checkout_with_single_item, external_shipping_method_id)
+    assign_external_shipping_to_checkout(
+        checkout_with_single_item, external_shipping_method
+    )
     checkout_with_single_item.save()
     checkout_with_single_item.metadata_storage.save()
     checkout_lines, _ = fetch_checkout_lines(checkout_with_single_item)
@@ -702,3 +957,311 @@ def test_external_shipping_method_called_only_once_during_tax_calculations(
     assert checkout_with_single_item.shipping_price == TaxedMoney(
         net=Money("1337.00", "USD"), gross=Money("1443.96", "USD")
     )
+
+
+@pytest.mark.parametrize("tax_app_id", [None, "test.app"])
+def test_calculate_and_add_tax_empty_tax_data_logging_address(
+    tax_app_id, checkout_with_single_item, address, caplog
+):
+    # given
+    checkout = checkout_with_single_item
+
+    address.validation_skipped = True
+    address.postal_code = "invalid postal code"
+    address.save(update_fields=["postal_code", "validation_skipped"])
+
+    checkout.shipping_address = address
+    checkout.billing_address = address
+    checkout.save(update_fields=["billing_address", "shipping_address"])
+
+    checkout.channel.tax_configuration.tax_app_id = tax_app_id
+    checkout.channel.tax_configuration.save()
+
+    zero_money = zero_taxed_money(checkout.currency)
+    manager_methods = {
+        "calculate_checkout_total": Mock(return_value=zero_money),
+        "calculate_checkout_subtotal": Mock(return_value=zero_money),
+        "calculate_checkout_line_total": Mock(return_value=zero_money),
+        "calculate_checkout_shipping": Mock(return_value=zero_money),
+        "get_checkout_shipping_tax_rate": Mock(return_value=Decimal("0.00")),
+        "get_checkout_line_tax_rate": Mock(return_value=Decimal("0.00")),
+        "get_taxes_for_checkout": Mock(return_value=None),
+    }
+    manager = Mock(**manager_methods)
+
+    checkout_lines_info, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, checkout_lines_info, manager)
+
+    # when
+    _calculate_and_add_tax(
+        TaxCalculationStrategy.TAX_APP,
+        None,
+        checkout,
+        manager,
+        checkout_info,
+        checkout_lines_info,
+        prices_entered_with_tax=False,
+    )
+
+    # then
+    assert (
+        f"Fetching tax data for checkout with address validation skipped. "
+        f"Address ID: {address.pk}" in caplog.text
+    )
+
+
+@pytest.mark.parametrize(
+    ("prices_entered_with_tax", "tax_app_id"),
+    [(True, None), (True, "test.app"), (False, None), (False, "test.app")],
+)
+@patch.object(logger, "warning")
+@patch("saleor.checkout.calculations._set_checkout_base_prices")
+def test_fetch_checkout_data_tax_data_with_tax_data_error(
+    mock_set_base_prices,
+    mocked_logger,
+    prices_entered_with_tax,
+    tax_app_id,
+    checkout_with_single_item,
+):
+    # given
+    checkout = checkout_with_single_item
+
+    channel = checkout.channel
+    channel.tax_configuration.tax_app_id = tax_app_id
+    channel.tax_configuration.prices_entered_with_tax = prices_entered_with_tax
+    channel.tax_configuration.save()
+
+    error_msg = "Invalid tax data"
+    errors = [{"error1": "Negative tax data"}, {"error2": "Invalid tax data"}]
+    returned_tax_error = TaxDataError(message=error_msg, errors=errors)
+    zero_money = zero_taxed_money(checkout.currency)
+    manager_methods = {
+        "calculate_checkout_total": Mock(return_value=zero_money),
+        "calculate_checkout_subtotal": Mock(return_value=zero_money),
+        "calculate_checkout_line_total": Mock(return_value=zero_money),
+        "calculate_checkout_shipping": Mock(return_value=zero_money),
+        "get_checkout_shipping_tax_rate": Mock(return_value=Decimal("0.00")),
+        "get_checkout_line_tax_rate": Mock(return_value=Decimal("0.00")),
+        "get_taxes_for_checkout": Mock(side_effect=returned_tax_error),
+    }
+    manager = Mock(**manager_methods)
+
+    checkout_lines_info, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, checkout_lines_info, manager)
+
+    # when
+    fetch_checkout_data(checkout_info, manager, checkout_lines_info, force_update=True)
+
+    # then
+    assert checkout_info.checkout.tax_error == error_msg
+    assert mocked_logger.call_count == 1
+    assert len(mocked_logger.call_args) == 2
+    assert mocked_logger.call_args[0][0] == error_msg
+    assert mocked_logger.call_args[1]["extra"]["errors"] == errors
+    mock_set_base_prices.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "prices_entered_with_tax",
+    [True, False],
+)
+@patch.object(logger, "warning")
+@patch("saleor.checkout.calculations._set_checkout_base_prices")
+def test_fetch_checkout_data_tax_data_missing_tax_id_empty_tax_data(
+    mock_set_base_prices,
+    mocked_logger,
+    prices_entered_with_tax,
+    checkout_with_single_item,
+):
+    # given
+    checkout = checkout_with_single_item
+
+    channel = checkout.channel
+    channel.tax_configuration.tax_app_id = None
+    channel.tax_configuration.prices_entered_with_tax = prices_entered_with_tax
+    channel.tax_configuration.save()
+
+    zero_money = zero_taxed_money(checkout.currency)
+    manager_methods = {
+        "calculate_checkout_total": Mock(return_value=zero_money),
+        "calculate_checkout_subtotal": Mock(return_value=zero_money),
+        "calculate_checkout_line_total": Mock(return_value=zero_money),
+        "calculate_checkout_shipping": Mock(return_value=zero_money),
+        "get_checkout_shipping_tax_rate": Mock(return_value=Decimal("0.00")),
+        "get_checkout_line_tax_rate": Mock(return_value=Decimal("0.00")),
+        "get_taxes_for_checkout": Mock(return_value=None),
+    }
+    manager = Mock(**manager_methods)
+
+    checkout_lines_info, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, checkout_lines_info, manager)
+
+    # when
+    fetch_checkout_data(checkout_info, manager, checkout_lines_info, force_update=True)
+
+    # then
+    # In case the app identifier is not set, in case of error in tax data, it's skipped.
+    assert not checkout_info.checkout.tax_error
+    assert mocked_logger.call_count == 0
+    mock_set_base_prices.assert_not_called()
+
+
+@patch("saleor.plugins.avatax.plugin.get_checkout_tax_data")
+@override_settings(PLUGINS=["saleor.plugins.avatax.plugin.DeprecatedAvataxPlugin"])
+def test_fetch_order_data_plugin_tax_data_with_negative_values(
+    mock_get_tax_data,
+    checkout_with_item_and_shipping,
+    caplog,
+    plugin_configuration,  # noqa: F811
+):
+    # given
+    checkout = checkout_with_item_and_shipping
+
+    channel = checkout.channel
+    channel.tax_configuration.tax_app_id = DeprecatedAvataxPlugin.PLUGIN_IDENTIFIER
+    channel.tax_configuration.save(update_fields=["tax_app_id"])
+
+    tax_data = {
+        "lines": [
+            {
+                "lineAmount": 30.0000,
+                "quantity": 3.0,
+                "itemCode": "SKU_A",
+            },
+            {
+                "lineAmount": -8.1300,
+                "quantity": 1.0,
+                "itemCode": "Shipping",
+            },
+        ]
+    }
+    mock_get_tax_data.return_value = tax_data
+
+    plugin_configuration()
+    manager = get_plugins_manager(allow_replica=False)
+    checkout_lines_info, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, checkout_lines_info, manager)
+
+    # when
+    fetch_checkout_data(checkout_info, manager, checkout_lines_info, force_update=True)
+
+    # then
+    assert checkout.tax_error == TaxDataErrorMessage.NEGATIVE_VALUE
+    assert TaxDataErrorMessage.NEGATIVE_VALUE in caplog.text
+    assert caplog.records[0].checkout_id == to_global_id_or_none(checkout)
+
+
+@patch("saleor.plugins.avatax.plugin.get_checkout_tax_data")
+@override_settings(PLUGINS=["saleor.plugins.avatax.plugin.DeprecatedAvataxPlugin"])
+def test_fetch_order_data_plugin_tax_data_price_overflow(
+    mock_get_tax_data,
+    checkout_with_item_and_shipping,
+    caplog,
+    plugin_configuration,  # noqa: F811
+):
+    # given
+    checkout = checkout_with_item_and_shipping
+
+    channel = checkout.channel
+    channel.tax_configuration.tax_app_id = DeprecatedAvataxPlugin.PLUGIN_IDENTIFIER
+    channel.tax_configuration.save(update_fields=["tax_app_id"])
+
+    tax_data = {
+        "lines": [
+            {
+                "lineAmount": 3892370265647658029.0000,
+                "quantity": 3.0,
+                "itemCode": "SKU_A",
+            },
+            {
+                "lineAmount": 8.1300,
+                "quantity": 1.0,
+                "itemCode": "Shipping",
+            },
+        ]
+    }
+    mock_get_tax_data.return_value = tax_data
+
+    plugin_configuration()
+    manager = get_plugins_manager(allow_replica=False)
+    checkout_lines_info, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, checkout_lines_info, manager)
+
+    # when
+    fetch_checkout_data(checkout_info, manager, checkout_lines_info, force_update=True)
+
+    # then
+    assert checkout.tax_error == TaxDataErrorMessage.OVERFLOW
+    assert TaxDataErrorMessage.OVERFLOW in caplog.text
+    assert caplog.records[0].checkout_id == to_global_id_or_none(checkout)
+
+
+def test_fetch_checkout_with_prior_price_change(
+    fetch_kwargs,
+    checkout_with_items,
+):
+    # given
+    checkout_with_items.price_expiration = timezone.now()
+    checkout_with_items.save(update_fields=["price_expiration"])
+    line = checkout_with_items.lines.first()
+    listing = ProductVariantChannelListing.objects.filter(
+        variant=line.variant, channel=checkout_with_items.channel
+    ).first()
+    new_prior_price_amount = Decimal(7)
+    assert listing is not None
+    assert listing.prior_price_amount != new_prior_price_amount
+    listing.prior_price_amount = new_prior_price_amount
+    listing.save(update_fields=["prior_price_amount"])
+
+    manager = get_plugins_manager(allow_replica=False)
+    lines_info, _ = fetch_checkout_lines(checkout_with_items)
+
+    fetch_kwargs = {
+        "checkout_info": fetch_checkout_info(checkout_with_items, lines_info, manager),
+        "manager": manager,
+        "lines": lines_info,
+        "address": checkout_with_items.shipping_address
+        or checkout_with_items.billing_address,
+    }
+
+    # when
+    fetch_checkout_data(**fetch_kwargs)
+
+    # then
+    line.refresh_from_db()
+    assert line.prior_unit_price_amount == new_prior_price_amount
+
+
+def test_fetch_checkout_with_prior_price_none(
+    fetch_kwargs,
+    checkout_with_items,
+):
+    # given
+    checkout_with_items.price_expiration = timezone.now()
+    checkout_with_items.save(update_fields=["price_expiration"])
+    line = checkout_with_items.lines.first()
+    listing = ProductVariantChannelListing.objects.filter(
+        variant=line.variant, channel=checkout_with_items.channel
+    ).first()
+    assert listing is not None
+    listing.prior_price_amount = None
+    listing.save(update_fields=["prior_price_amount"])
+
+    manager = get_plugins_manager(allow_replica=False)
+    lines_info, _ = fetch_checkout_lines(checkout_with_items)
+
+    fetch_kwargs = {
+        "checkout_info": fetch_checkout_info(checkout_with_items, lines_info, manager),
+        "manager": manager,
+        "lines": lines_info,
+        "address": checkout_with_items.shipping_address
+        or checkout_with_items.billing_address,
+    }
+
+    # when
+    fetch_checkout_data(**fetch_kwargs)
+
+    # then
+    line.refresh_from_db()
+    assert line.prior_unit_price_amount is None
+    assert line.currency is not None

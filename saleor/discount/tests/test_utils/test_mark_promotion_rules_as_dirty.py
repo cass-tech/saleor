@@ -1,16 +1,15 @@
-from datetime import datetime, timedelta
+import datetime
 from decimal import Decimal
 from unittest.mock import patch
 
 import graphene
-import pytz
 
 from ... import RewardValueType
 from ...models import Promotion, PromotionRule
-from ...utils import mark_catalogue_promotion_rules_as_dirty
+from ...utils.promotion import mark_catalogue_promotion_rules_as_dirty
 
 
-@patch("saleor.discount.utils.PromotionRule.objects.filter")
+@patch("saleor.discount.utils.promotion.PromotionRule.objects.filter")
 def test_mark_catalogue_promotion_rules_as_dirty_with_empty_list_as_input(
     mocked_promotion_rule_filter,
 ):
@@ -28,7 +27,7 @@ def test_mark_catalogue_promotion_rules_as_dirty_single_promotion(
     promotion = catalogue_promotion
     second_promotion = Promotion.objects.create(
         name="Promotion",
-        end_date=datetime.now(tz=pytz.UTC) + timedelta(days=30),
+        end_date=datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=30),
     )
     PromotionRule.objects.create(
         name="Percentage promotion rule",
@@ -39,7 +38,7 @@ def test_mark_catalogue_promotion_rules_as_dirty_single_promotion(
             }
         },
         reward_value_type=RewardValueType.PERCENTAGE,
-        reward_value=Decimal("10"),
+        reward_value=Decimal(10),
         variants_dirty=False,
     )
 
@@ -66,7 +65,7 @@ def test_mark_catalogue_promotion_rules_as_dirty_multiple_promotion(
     promotion = catalogue_promotion
     second_promotion = Promotion.objects.create(
         name="Promotion",
-        end_date=datetime.now(tz=pytz.UTC) + timedelta(days=30),
+        end_date=datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=30),
     )
     PromotionRule.objects.create(
         name="Percentage promotion rule",
@@ -77,7 +76,7 @@ def test_mark_catalogue_promotion_rules_as_dirty_multiple_promotion(
             }
         },
         reward_value_type=RewardValueType.PERCENTAGE,
-        reward_value=Decimal("10"),
+        reward_value=Decimal(10),
         variants_dirty=False,
     )
 

@@ -2,14 +2,19 @@ from unittest import mock
 from unittest.mock import patch
 
 import graphene
+import pytest
 from django.test import override_settings
 
 from .....discount.models import PromotionRule
-from .....discount.utils import get_active_catalogue_promotion_rules
+from .....discount.utils.promotion import get_active_catalogue_promotion_rules
+from .....graphql.core.enums import ErrorPolicyEnum
+from .....graphql.product.bulk_mutations.product_variant_bulk_update import (
+    ProductVariantBulkUpdate,
+)
 from .....graphql.webhook.subscription_payload import get_pre_save_payload_key
 from .....product.error_codes import ProductVariantBulkErrorCode
 from .....product.models import ProductChannelListing
-from .....tests.utils import flush_post_commit_hooks
+from .....warehouse.models import Stock
 from .....webhook.event_types import WebhookEventAsyncType
 from .....webhook.models import Webhook
 from ....tests.utils import get_graphql_content
@@ -58,6 +63,10 @@ PRODUCT_VARIANT_BULK_UPDATE_MUTATION = """
                                 currency
                                 amount
                             }
+                            priorPrice {
+                                currency
+                                amount
+                            }
                             preorderThreshold {
                                 quantity
                             }
@@ -69,6 +78,11 @@ PRODUCT_VARIANT_BULK_UPDATE_MUTATION = """
                     }
                 }
                 count
+                errors{
+                    field
+                    message
+                    code
+                }
         }
     }
 """
@@ -105,6 +119,10 @@ def test_product_variant_bulk_update(
         {
             "id": variant_id,
             "name": new_name,
+            "preorder": {
+                "endDate": "2022-12-12T12:12:12Z",
+                "globalThreshold": 10,
+            },
             "metadata": [{"key": metadata_key, "value": metadata_value}],
         }
     ]
@@ -117,7 +135,6 @@ def test_product_variant_bulk_update(
         PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
     )
     content = get_graphql_content(response)
-    flush_post_commit_hooks()
     data = content["data"]["productVariantBulkUpdate"]
     product_with_single_variant.refresh_from_db(fields=["search_index_dirty"])
 
@@ -132,6 +149,95 @@ def test_product_variant_bulk_update(
     assert product_with_single_variant.variants.count() == 1
     assert old_name != new_name
     assert product_variant_created_webhook_mock.call_count == data["count"]
+    for rule in get_active_catalogue_promotion_rules():
+        assert rule.variants_dirty
+
+    variant.refresh_from_db()
+
+    assert variant.preorder_end_date
+    assert variant.preorder_global_threshold
+    assert variant.is_preorder
+
+
+@pytest.mark.parametrize(
+    "error_policy",
+    [ErrorPolicyEnum.REJECT_FAILED_ROWS.name, ErrorPolicyEnum.IGNORE_FAILED.name],
+)
+@patch(
+    "saleor.graphql.product.bulk_mutations."
+    "product_variant_bulk_update.get_webhooks_for_event"
+)
+@patch.object(ProductVariantBulkUpdate, "save_variants")
+def test_product_variant_bulk_create_stock_thread_race(
+    mocked_save,
+    mocked_get_webhooks_for_event,
+    error_policy,
+    staff_api_client,
+    variant_with_many_stocks,
+    warehouse,
+    permission_manage_products,
+    any_webhook,
+    settings,
+):
+    # given
+    mocked_get_webhooks_for_event.return_value = [any_webhook]
+    settings.PLUGINS = ["saleor.plugins.webhook.plugin.WebhookPlugin"]
+
+    variant = variant_with_many_stocks
+    new_stock_quantity_created_before_save = 999
+
+    def add_stock_before_save(*args, **kwargs):
+        stock = Stock(
+            warehouse=warehouse,
+            quantity=new_stock_quantity_created_before_save,
+            product_variant=variant,
+        )
+        stock.save()
+
+    mocked_save.side_effect = add_stock_before_save
+
+    product_id = graphene.Node.to_global_id("Product", variant.product_id)
+    variant_id = graphene.Node.to_global_id("ProductVariant", variant.pk)
+    stocks = variant.stocks.all()
+    assert len(stocks) == 2
+    new_stock_quantity = 100
+
+    variants = [
+        {
+            "id": variant_id,
+            "stocks": {
+                "create": [
+                    {
+                        "quantity": new_stock_quantity,
+                        "warehouse": graphene.Node.to_global_id(
+                            "Warehouse", warehouse.pk
+                        ),
+                    },
+                ],
+            },
+        }
+    ]
+
+    variables = {
+        "productId": product_id,
+        "variants": variants,
+        "errorPolicy": error_policy,
+    }
+
+    # when
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+    response = staff_api_client.post_graphql(
+        PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
+    )
+
+    content = get_graphql_content(response)
+    data = content["data"]["productVariantBulkUpdate"]
+
+    # then
+    assert not data["results"][0]["errors"]
+    assert data["count"] == 1
+    assert variant.stocks.count() == 3
+    assert variant.stocks.last().quantity == new_stock_quantity_created_before_save
     for rule in get_active_catalogue_promotion_rules():
         assert rule.variants_dirty
 
@@ -195,7 +301,6 @@ def test_product_variant_bulk_update_stocks(
         PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
     )
     content = get_graphql_content(response)
-    flush_post_commit_hooks()
     data = content["data"]["productVariantBulkUpdate"]
 
     # then
@@ -288,7 +393,6 @@ def test_product_variant_bulk_update_and_remove_stock(
         PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
     )
     content = get_graphql_content(response)
-    flush_post_commit_hooks()
     data = content["data"]["productVariantBulkUpdate"]
 
     # then
@@ -326,7 +430,6 @@ def test_product_variant_bulk_update_and_remove_stock_when_stock_not_exists(
         PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
     )
     content = get_graphql_content(response)
-    flush_post_commit_hooks()
     data = content["data"]["productVariantBulkUpdate"]
 
     # then
@@ -372,7 +475,6 @@ def test_product_variant_bulk_update_stocks_with_invalid_warehouse(
         PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
     )
     content = get_graphql_content(response)
-    flush_post_commit_hooks()
     data = content["data"]["productVariantBulkUpdate"]
     stock_to_update.refresh_from_db()
 
@@ -599,7 +701,6 @@ def test_product_variant_bulk_update_with_already_existing_sku(
         PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
     )
     content = get_graphql_content(response)
-    flush_post_commit_hooks()
     data = content["data"]["productVariantBulkUpdate"]
 
     # then
@@ -628,7 +729,6 @@ def test_product_variant_bulk_update_when_variant_not_exists(
         PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
     )
     content = get_graphql_content(response)
-    flush_post_commit_hooks()
     data = content["data"]["productVariantBulkUpdate"]
 
     # then
@@ -695,7 +795,6 @@ def test_product_variant_bulk_update_attributes(
         PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
     )
     content = get_graphql_content(response)
-    flush_post_commit_hooks()
     data = content["data"]["productVariantBulkUpdate"]
 
     # then
@@ -745,7 +844,6 @@ def test_generate_pre_save_payloads(
     # when
     staff_api_client.user.user_permissions.add(permission_manage_products)
     staff_api_client.post_graphql(PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables)
-    flush_post_commit_hooks()
 
     # then
     payload_key = get_pre_save_payload_key(webhook, variant)
@@ -754,3 +852,72 @@ def test_generate_pre_save_payloads(
     pre_save_payload = mocked_call_event.call_args[1]["pre_save_payloads"]
     assert payload_key in pre_save_payload
     assert request_time.isoformat() == pre_save_payload[payload_key]["issuedAt"]
+
+
+def test_product_variant_bulk_update_channel_listings_input_with_prior_price(
+    staff_api_client,
+    variant,
+    permission_manage_products,
+    channel_PLN,
+):
+    # given
+
+    product = variant.product
+    variant_id = graphene.Node.to_global_id("ProductVariant", variant.pk)
+
+    ProductChannelListing.objects.create(product=product, channel=channel_PLN)
+    existing_variant_listing = variant.channel_listings.get()
+
+    assert variant.channel_listings.count() == 1
+    product_id = graphene.Node.to_global_id("Product", product.pk)
+
+    new_price_for_existing_variant_listing = 50.0
+    new_prior_price_for_existing_variant_listing = 42.0
+    not_existing_variant_listing_price = 20.0
+    not_existing_variant_listing_prior_price = 24.0
+
+    variants = [
+        {
+            "id": variant_id,
+            "channelListings": {
+                "update": [
+                    {
+                        "price": new_price_for_existing_variant_listing,
+                        "priorPrice": new_prior_price_for_existing_variant_listing,
+                        "channelListing": graphene.Node.to_global_id(
+                            "ProductVariantChannelListing", existing_variant_listing.id
+                        ),
+                    }
+                ],
+                "create": [
+                    {
+                        "price": not_existing_variant_listing_price,
+                        "priorPrice": not_existing_variant_listing_prior_price,
+                        "channelId": graphene.Node.to_global_id(
+                            "Channel", channel_PLN.pk
+                        ),
+                    }
+                ],
+            },
+        },
+    ]
+
+    # when
+    variables = {"productId": product_id, "variants": variants}
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+    response = staff_api_client.post_graphql(
+        PRODUCT_VARIANT_BULK_UPDATE_MUTATION, variables
+    )
+    get_graphql_content(response, ignore_errors=True)
+
+    # then
+    existing_variant_listing.refresh_from_db()
+    assert (
+        existing_variant_listing.prior_price_amount
+        == new_prior_price_for_existing_variant_listing
+    )
+    new_variant_listing = variant.channel_listings.get(channel=channel_PLN)
+    assert (
+        new_variant_listing.prior_price_amount
+        == not_existing_variant_listing_prior_price
+    )

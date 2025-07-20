@@ -4,9 +4,8 @@ from django.core.exceptions import ValidationError
 from ....discount import models as discount_models
 from ....discount.error_codes import DiscountErrorCode
 from ....permission.enums import SitePermissions
-from ...channel import ChannelContext
 from ...core import ResolveInfo
-from ...core.descriptions import DEPRECATED_IN_3X_MUTATION
+from ...core.context import ChannelContext
 from ...core.enums import LanguageCodeEnum
 from ...core.types import TranslationError
 from ...core.utils import from_global_id_or_error, raise_validation_error
@@ -28,11 +27,7 @@ class SaleTranslate(BaseTranslateMutation):
         )
 
     class Meta:
-        description = (
-            "Creates/updates translations for a sale."
-            + DEPRECATED_IN_3X_MUTATION
-            + " Use `PromotionTranslate` mutation instead."
-        )
+        description = "Creates/updates translations for a sale."
         model = discount_models.Promotion
         object_type = Sale
         return_field_name = "sale"
@@ -47,7 +42,7 @@ class SaleTranslate(BaseTranslateMutation):
         instance = cls.get_promotion_instance(id)
         cls.validate_input(input)
 
-        input = cls.pre_update_or_create(instance, input)
+        input = cls.pre_update_or_create(instance, input, language_code)
 
         translation, created = instance.translations.update_or_create(
             language_code=language_code, defaults=input
@@ -55,9 +50,9 @@ class SaleTranslate(BaseTranslateMutation):
         manager = get_plugin_manager_promise(info.context).get()
 
         if created:
-            cls.call_event(manager.translation_created, translation)
+            cls.call_event(manager.translations_created, [translation])
         else:
-            cls.call_event(manager.translation_updated, translation)
+            cls.call_event(manager.translations_updated, [translation])
 
         return cls(
             **{

@@ -15,10 +15,9 @@ from .....webhook.event_types import WebhookEventAsyncType
 from ....account.utils import get_out_of_scope_permissions, get_user_accessible_channels
 from ....app.dataloaders import get_app_promise
 from ....core import ResolveInfo
-from ....core.descriptions import ADDED_IN_314, PREVIEW_FEATURE
 from ....core.doc_category import DOC_CATEGORY_USERS
 from ....core.enums import PermissionEnum
-from ....core.mutations import ModelMutation
+from ....core.mutations import DeprecatedModelMutation
 from ....core.types import BaseInputObjectType, NonNullList, PermissionGroupError
 from ....core.utils import WebhookEventInfo
 from ....plugins.dataloaders import get_plugin_manager_promise
@@ -37,10 +36,7 @@ class PermissionGroupInput(BaseInputObjectType):
         required=False,
     )
     add_channels = NonNullList(
-        graphene.ID,
-        description="List of channels to assign to this group."
-        + ADDED_IN_314
-        + PREVIEW_FEATURE,
+        graphene.ID, description="List of channels to assign to this group."
     )
 
     class Meta:
@@ -52,9 +48,7 @@ class PermissionGroupCreateInput(PermissionGroupInput):
     restricted_access_to_channels = graphene.Boolean(
         description=(
             "Determine if the group has restricted access to channels.  DEFAULT: False"
-        )
-        + ADDED_IN_314
-        + PREVIEW_FEATURE,
+        ),
         default_value=False,
         required=False,
     )
@@ -63,7 +57,7 @@ class PermissionGroupCreateInput(PermissionGroupInput):
         doc_category = DOC_CATEGORY_USERS
 
 
-class PermissionGroupCreate(ModelMutation):
+class PermissionGroupCreate(DeprecatedModelMutation):
     class Arguments:
         input = PermissionGroupCreateInput(
             description="Input fields to create permission group.", required=True
@@ -143,7 +137,9 @@ class PermissionGroupCreate(ModelMutation):
                 )
 
     @classmethod
-    def check_permissions(cls, context, permissions=None, **data):
+    def check_permissions(
+        cls, context, permissions=None, require_all_permissions=False, **data
+    ):
         app = get_app_promise(context).get()
         if app:
             raise PermissionDenied(

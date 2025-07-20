@@ -1,6 +1,7 @@
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, cast
 
 import graphene
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db.models import QuerySet
 
@@ -8,20 +9,15 @@ from .....app.models import App
 from .....channel import TransactionFlowStrategy
 from .....channel.models import Channel
 from .....checkout import models as checkout_models
+from .....checkout.utils import activate_payments, cancel_active_payments
 from .....order import models as order_models
-from .....payment import TransactionEventType
+from .....payment import FAILED_TRANSACTION_EVENTS, TransactionEventType
 from .....payment import models as payment_models
 from .....payment.error_codes import TransactionProcessErrorCode
 from .....payment.interface import PaymentGatewayData
 from .....payment.utils import (
     get_final_session_statuses,
     handle_transaction_process_session,
-)
-from ....core.descriptions import (
-    ADDED_IN_313,
-    ADDED_IN_314,
-    ADDED_IN_316,
-    PREVIEW_FEATURE,
 )
 from ....core.doc_category import DOC_CATEGORY_PAYMENTS
 from ....core.mutations import BaseMutation
@@ -60,8 +56,7 @@ class TransactionProcess(BaseMutation):
             description=(
                 "The token of the transaction to process. "
                 "One of field id or token is required."
-            )
-            + ADDED_IN_314,
+            ),
             required=False,
         )
         data = graphene.Argument(
@@ -74,7 +69,7 @@ class TransactionProcess(BaseMutation):
                 "The customer's IP address will be passed to the payment app. "
                 "The IP should be in ipv4 or ipv6 format. "
                 "The field can be used only by an app that has `HANDLE_PAYMENTS` "
-                "permission." + ADDED_IN_316
+                "permission."
             )
         )
 
@@ -83,8 +78,6 @@ class TransactionProcess(BaseMutation):
         description = (
             "Processes a transaction session. It triggers the webhook "
             "`TRANSACTION_PROCESS_SESSION`, to the assigned `paymentGateways`. "
-            + ADDED_IN_313
-            + PREVIEW_FEATURE
         )
         error_type_class = common_types.TransactionProcessError
 
@@ -92,15 +85,14 @@ class TransactionProcess(BaseMutation):
     def get_action(cls, event: payment_models.TransactionEvent, channel: "Channel"):
         if event.type == TransactionEventType.AUTHORIZATION_REQUEST:
             return TransactionFlowStrategy.AUTHORIZATION
-        elif event.type == TransactionEventType.CHARGE_REQUEST:
+        if event.type == TransactionEventType.CHARGE_REQUEST:
             return TransactionFlowStrategy.CHARGE
-
         return channel.default_transaction_flow_strategy
 
     @classmethod
     def get_source_object(
         cls, transaction_item: payment_models.TransactionItem
-    ) -> Union[checkout_models.Checkout, order_models.Order]:
+    ) -> checkout_models.Checkout | order_models.Order:
         if transaction_item.checkout_id:
             checkout = cast(checkout_models.Checkout, transaction_item.checkout)
             return checkout
@@ -144,7 +136,7 @@ class TransactionProcess(BaseMutation):
         )
 
     @classmethod
-    def get_already_processed_event(cls, events) -> Optional[TransactionEvent]:
+    def get_already_processed_event(cls, events) -> TransactionEvent | None:
         for event in events:
             if (
                 event.type in get_final_session_statuses()
@@ -196,6 +188,10 @@ class TransactionProcess(BaseMutation):
             )
         request_event = cls.get_request_event(events)
         source_object = cls.get_source_object(transaction_item)
+
+        if isinstance(source_object, checkout_models.Checkout):
+            cls.validate_checkout(source_object)
+
         app = cls.clean_payment_app(transaction_item)
         app_identifier = app.identifier
         action = cls.get_action(request_event, source_object.channel)
@@ -206,6 +202,13 @@ class TransactionProcess(BaseMutation):
         )
 
         manager = get_plugin_manager_promise(info.context).get()
+
+        payment_ids = []
+        if isinstance(source_object, checkout_models.Checkout):
+            # Deactivate active payment objects to avoid processing checkout
+            # with use of two different flows.
+            payment_ids = cancel_active_payments(source_object)
+
         event, data = handle_transaction_process_session(
             transaction_item=transaction_item,
             source_object=source_object,
@@ -218,6 +221,26 @@ class TransactionProcess(BaseMutation):
             manager=manager,
             request_event=request_event,
         )
+        if event.type in FAILED_TRANSACTION_EVENTS and payment_ids:
+            activate_payments(payment_ids)
 
         transaction_item.refresh_from_db()
         return cls(transaction=transaction_item, transaction_event=event, data=data)
+
+    @staticmethod
+    def validate_checkout(checkout: checkout_models.Checkout) -> None:
+        if checkout.is_checkout_locked():
+            error_code = (
+                TransactionProcessErrorCode.CHECKOUT_COMPLETION_IN_PROGRESS.value
+            )
+            raise ValidationError(
+                {
+                    "id": ValidationError(
+                        "Transaction cannot be processed - the checkout completion is "
+                        "currently in progress. Please wait until the process is "
+                        f"finished (max {settings.CHECKOUT_COMPLETION_LOCK_TIME} "
+                        "seconds).",
+                        code=error_code,
+                    )
+                }
+            )

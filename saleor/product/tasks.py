@@ -1,7 +1,6 @@
 import logging
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Optional
 from uuid import UUID
 
 from celery.utils.log import get_task_logger
@@ -13,6 +12,7 @@ from django.utils import timezone
 
 from ..attribute.models import Attribute
 from ..celeryconf import app
+from ..core.db.connection import allow_writer
 from ..core.exceptions import PreorderAllocationError
 from ..discount import PromotionType
 from ..discount.models import Promotion, PromotionRule
@@ -30,7 +30,7 @@ from .utils.variants import (
 )
 
 logger = logging.getLogger(__name__)
-task_logger = get_task_logger(__name__)
+task_logger = get_task_logger(f"{__name__}.celery")
 
 PRODUCTS_BATCH_SIZE = 300
 
@@ -38,7 +38,7 @@ VARIANTS_UPDATE_BATCH = 500
 # Results in update time ~0.2s
 DISCOUNTED_PRODUCT_BATCH = 2000
 # Results in update time ~2s when 600 channels exist
-PROMOTION_RULE_BATCH_SIZE = 100
+PROMOTION_RULE_BATCH_SIZE = 50
 
 
 def _variants_in_batches(variants_qs):
@@ -66,7 +66,9 @@ def _update_variants_names(instance: ProductType, saved_attributes: Iterable):
     if not attributes_changed:
         return
 
-    variants = ProductVariant.objects.filter(
+    variants = ProductVariant.objects.using(
+        settings.DATABASE_CONNECTION_REPLICA_NAME
+    ).filter(
         name="",
         product__in=instance.products.all(),
         product__product_type__variant_attributes__in=attributes_changed,
@@ -83,15 +85,21 @@ def _update_variants_names(instance: ProductType, saved_attributes: Iterable):
 @app.task
 def update_variants_names(product_type_pk: int, saved_attributes_ids: list[int]):
     try:
-        instance = ProductType.objects.get(pk=product_type_pk)
+        instance = ProductType.objects.using(
+            settings.DATABASE_CONNECTION_REPLICA_NAME
+        ).get(pk=product_type_pk)
     except ObjectDoesNotExist:
-        logging.warning(f"Cannot find product type with id: {product_type_pk}.")
+        logger.warning("Cannot find product type with id: %s.", product_type_pk)
         return
-    saved_attributes = Attribute.objects.filter(pk__in=saved_attributes_ids)
-    _update_variants_names(instance, saved_attributes)
+    saved_attributes = Attribute.objects.using(
+        settings.DATABASE_CONNECTION_REPLICA_NAME
+    ).filter(pk__in=saved_attributes_ids)
+    with allow_writer():
+        _update_variants_names(instance, saved_attributes)
 
 
 @app.task
+@allow_writer()
 def update_products_discounted_prices_of_promotion_task(promotion_pk: UUID):
     # FIXME: Should be removed in Saleor 3.21
 
@@ -101,9 +109,9 @@ def update_products_discounted_prices_of_promotion_task(promotion_pk: UUID):
 
 
 def _get_channel_to_products_map(rule_to_variant_list):
-    variant_ids = set(
-        [rule_to_variant.productvariant_id for rule_to_variant in rule_to_variant_list]
-    )
+    variant_ids = {
+        rule_to_variant.productvariant_id for rule_to_variant in rule_to_variant_list
+    }
     variant_id_with_product_id_qs = (
         ProductVariant.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME)
         .filter(id__in=variant_ids)
@@ -113,9 +121,9 @@ def _get_channel_to_products_map(rule_to_variant_list):
     for variant_id, product_id in variant_id_with_product_id_qs:
         variant_id_to_product_id_map[variant_id] = product_id
 
-    rule_ids = set(
-        [rule_to_variant.promotionrule_id for rule_to_variant in rule_to_variant_list]
-    )
+    rule_ids = {
+        rule_to_variant.promotionrule_id for rule_to_variant in rule_to_variant_list
+    }
     PromotionChannel = PromotionRule.channels.through
     promotion_channel_qs = (
         PromotionChannel.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME)
@@ -124,13 +132,18 @@ def _get_channel_to_products_map(rule_to_variant_list):
     )
 
     rule_to_channels_map = defaultdict(set)
-    for promotionrule_id, channel_id in promotion_channel_qs.iterator():
+    for promotionrule_id, channel_id in promotion_channel_qs.iterator(chunk_size=1000):
         rule_to_channels_map[promotionrule_id].add(channel_id)
     channel_to_products_map = defaultdict(set)
     for rule_to_variant in rule_to_variant_list:
         channel_ids = rule_to_channels_map[rule_to_variant.promotionrule_id]
         for channel_id in channel_ids:
-            product_id = variant_id_to_product_id_map[rule_to_variant.productvariant_id]
+            try:
+                product_id = variant_id_to_product_id_map[
+                    rule_to_variant.productvariant_id
+                ]
+            except KeyError:
+                continue
             channel_to_products_map[channel_id].add(product_id)
 
     return channel_to_products_map
@@ -139,9 +152,8 @@ def _get_channel_to_products_map(rule_to_variant_list):
 def _get_existing_rule_variant_list(rules: QuerySet[PromotionRule]):
     PromotionRuleVariant = PromotionRule.variants.through
     existing_rules_variants = (
-        PromotionRuleVariant.objects.filter(
-            Exists(rules.filter(pk=OuterRef("promotionrule_id")))
-        )
+        PromotionRuleVariant.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME)
+        .filter(Exists(rules.filter(pk=OuterRef("promotionrule_id"))))
         .all()
         .values_list(
             "promotionrule_id",
@@ -155,6 +167,7 @@ def _get_existing_rule_variant_list(rules: QuerySet[PromotionRule]):
 
 
 @app.task
+@allow_writer()
 def update_variant_relations_for_active_promotion_rules_task():
     promotions = (
         Promotion.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME)
@@ -202,11 +215,12 @@ def update_variant_relations_for_active_promotion_rules_task():
 
 
 @app.task
+@allow_writer()
 def update_products_discounted_prices_for_promotion_task(
     product_ids: Iterable[int],
-    start_id: Optional[UUID] = None,
+    start_id: UUID | None = None,
     *,
-    rule_ids: Optional[list[UUID]] = None,
+    rule_ids: list[UUID] | None = None,
 ):
     # FIXME: Should be removed in Saleor 3.21
 
@@ -216,6 +230,7 @@ def update_products_discounted_prices_for_promotion_task(
 
 
 @app.task
+@allow_writer()
 def recalculate_discounted_price_for_products_task():
     """Recalculate discounted price for products."""
     listings = (
@@ -227,8 +242,8 @@ def recalculate_discounted_price_for_products_task():
         "id",
         "product_id",
     )
-    products_ids = set([product_id for _, product_id in listing_details])
-    listing_ids = set([listing_id for listing_id, _ in listing_details])
+    products_ids = {product_id for _, product_id in listing_details}
+    listing_ids = {listing_id for listing_id, _ in listing_details}
     if products_ids:
         products = Product.objects.using(
             settings.DATABASE_CONNECTION_REPLICA_NAME
@@ -248,17 +263,19 @@ def recalculate_discounted_price_for_products_task():
 
 
 @app.task
+@allow_writer()
 def update_discounted_prices_task(product_ids: Iterable[int]):
     # FIXME: Should be removed in Saleor 3.21
 
     # in case triggering the task by old server worker, we will just mark the products
-    # as dirty. The recalculation will happen in the backgorund
+    # as dirty. The recalculation will happen in the background.
     ProductChannelListing.objects.filter(product_id__in=product_ids).update(
         discounted_price_dirty=True
     )
 
 
 @app.task
+@allow_writer()
 def deactivate_preorder_for_variants_task():
     variants_to_clean = _get_preorder_variants_to_clean()
 
@@ -286,24 +303,22 @@ def update_products_search_vector_task():
         .order_by("updated_at")[:PRODUCTS_BATCH_SIZE]
         .values_list("id", flat=True)
     )
-    update_products_search_vector(products)
+    with allow_writer():
+        update_products_search_vector(products)
 
 
 @app.task(queue=settings.COLLECTION_PRODUCT_UPDATED_QUEUE_NAME)
+@allow_writer()
 def collection_product_updated_task(product_ids):
     manager = get_plugins_manager(allow_replica=True)
     products = list(
-        Product.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME)
-        .filter(id__in=product_ids)
-        .prefetched_for_webhook(single_object=False)
+        Product.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME).filter(
+            id__in=product_ids
+        )
     )
     replica_products_count = len(products)
     if replica_products_count != len(product_ids):
-        products = list(
-            Product.objects.filter(id__in=product_ids).prefetched_for_webhook(
-                single_object=False
-            )
-        )
+        products = list(Product.objects.filter(id__in=product_ids))
         if len(products) != replica_products_count:
             logger.warning(
                 "collection_product_updated_task fetched %s products from replica, "

@@ -1,4 +1,5 @@
-from typing import Any, Callable, Union
+from collections.abc import Callable
+from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.db.models import Exists, OuterRef
@@ -121,13 +122,13 @@ def public_address_permissions(
 
     if address.user_addresses.filter(Exists(staff_users.filter(id=OuterRef("id")))):
         return [AccountPermissions.MANAGE_STAFF]
-    elif (
+    if (
         warehouse_models.Warehouse.objects.using(database_connection_name)
         .filter(address_id=address.id)
         .exists()
     ):
         return [ProductPermissions.MANAGE_PRODUCTS]
-    elif (
+    if (
         site_models.SiteSettings.objects.using(database_connection_name)
         .filter(company_address_id=address.id)
         .exists()
@@ -201,7 +202,7 @@ def menu_permissions(_info: ResolveInfo, _object_pk: Any) -> list[BasePermission
 def app_permissions(info: ResolveInfo, object_pk: str) -> list[BasePermissionEnum]:
     auth_token = info.context.decoded_auth_token or {}
     app = get_app_promise(info.context).get()
-    app_id: Union[str, int, None]
+    app_id: str | int | None
     if auth_token.get("type") == JWT_THIRDPARTY_ACCESS_TYPE:
         _, app_id = from_global_id_or_error(auth_token["app"], "App")
     else:
@@ -249,8 +250,7 @@ def attribute_permissions(info: ResolveInfo, attribute_pk: int):
     )
     if attribute.type == AttributeType.PAGE_TYPE:
         return page_type_permissions(info, attribute_pk)
-    else:
-        return product_type_permissions(info, attribute_pk)
+    return product_type_permissions(info, attribute_pk)
 
 
 def shipping_permissions(
@@ -321,8 +321,8 @@ PUBLIC_META_PERMISSION_MAP: dict[
     "Invoice": invoice_permissions,
     "Menu": menu_permissions,
     "MenuItem": menu_permissions,
-    "Order": no_permissions,
-    "OrderLine": no_permissions,
+    "Order": order_permissions,
+    "OrderLine": order_permissions,
     "Page": page_permissions,
     "PageType": page_type_permissions,
     "Payment": public_payment_permissions,

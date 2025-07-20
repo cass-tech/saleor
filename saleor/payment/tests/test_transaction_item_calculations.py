@@ -1,8 +1,6 @@
 import datetime
-from datetime import timedelta
 from decimal import Decimal
 
-import pytz
 from django.utils import timezone
 from freezegun import freeze_time
 
@@ -13,14 +11,14 @@ from ..transaction_item_calculations import recalculate_transaction_amounts
 
 def _assert_amounts(
     transaction: TransactionItem,
-    authorized_value=Decimal("0"),
-    charged_value=Decimal("0"),
-    refunded_value=Decimal("0"),
-    canceled_value=Decimal("0"),
-    authorize_pending_value=Decimal("0"),
-    charge_pending_value=Decimal("0"),
-    refund_pending_value=Decimal("0"),
-    cancel_pending_value=Decimal("0"),
+    authorized_value=Decimal(0),
+    charged_value=Decimal(0),
+    refunded_value=Decimal(0),
+    canceled_value=Decimal(0),
+    authorize_pending_value=Decimal(0),
+    charge_pending_value=Decimal(0),
+    refund_pending_value=Decimal(0),
+    cancel_pending_value=Decimal(0),
 ):
     assert sum(
         [
@@ -134,7 +132,7 @@ def test_with_only_authorize_failure_event(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, authorize_pending_value=Decimal("0"), authorized_value=Decimal("0")
+        transaction, authorize_pending_value=Decimal(0), authorized_value=Decimal(0)
     )
 
 
@@ -161,7 +159,7 @@ def test_with_authorize_request_and_success_events(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        authorize_pending_value=Decimal("0"),
+        authorize_pending_value=Decimal(0),
         authorized_value=authorize_value,
     )
 
@@ -188,7 +186,7 @@ def test_with_authorize_request_and_failure_events(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, authorize_pending_value=Decimal("0"), authorized_value=Decimal("0")
+        transaction, authorize_pending_value=Decimal(0), authorized_value=Decimal(0)
     )
 
 
@@ -214,7 +212,7 @@ def test_with_authorize_success_and_failure_events(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, authorize_pending_value=Decimal("0"), authorized_value=Decimal("0")
+        transaction, authorize_pending_value=Decimal(0), authorized_value=Decimal(0)
     )
 
 
@@ -235,7 +233,7 @@ def test_with_authorize_success_and_older_failure_events(
     )
     failure_event = events[1]
     assert failure_event.type == TransactionEventType.AUTHORIZATION_FAILURE
-    failure_event.created_at = timezone.now() - timedelta(minutes=5)
+    failure_event.created_at = timezone.now() - datetime.timedelta(minutes=5)
     failure_event.save()
 
     # when
@@ -245,7 +243,7 @@ def test_with_authorize_success_and_older_failure_events(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        authorize_pending_value=Decimal("0"),
+        authorize_pending_value=Decimal(0),
         authorized_value=authorize_value,
     )
 
@@ -256,7 +254,7 @@ def test_with_authorize_adjustment(
     # given
     transaction = transaction_item_generator()
     authorize_value = Decimal("11.00")
-    authorize_adjustment_value = Decimal("100")
+    authorize_adjustment_value = Decimal(100)
     events = transaction_events_generator(
         transaction=transaction,
         psp_references=["1", "2", "3", "4"],
@@ -277,7 +275,7 @@ def test_with_authorize_adjustment(
     # set the newest time for adjustment event
     adjustment_event = events[2]
     assert adjustment_event.type == TransactionEventType.AUTHORIZATION_ADJUSTMENT
-    adjustment_event.created_at = timezone.now() + timedelta(minutes=5)
+    adjustment_event.created_at = timezone.now() + datetime.timedelta(minutes=5)
     adjustment_event.save()
 
     # when
@@ -287,7 +285,7 @@ def test_with_authorize_adjustment(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        authorize_pending_value=Decimal("0"),
+        authorize_pending_value=Decimal(0),
         authorized_value=authorize_adjustment_value,
     )
 
@@ -401,7 +399,7 @@ def test_with_only_charge_failure_event(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, charge_pending_value=Decimal("0"), charged_value=Decimal("0")
+        transaction, charge_pending_value=Decimal(0), charged_value=Decimal(0)
     )
 
 
@@ -428,7 +426,7 @@ def test_with_charge_request_and_success_events(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        charge_pending_value=Decimal("0"),
+        charge_pending_value=Decimal(0),
         charged_value=charge_value,
     )
 
@@ -455,7 +453,7 @@ def test_with_charge_request_and_failure_events(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, charge_pending_value=Decimal("0"), charged_value=Decimal("0")
+        transaction, charge_pending_value=Decimal(0), charged_value=Decimal(0)
     )
 
 
@@ -481,7 +479,7 @@ def test_with_charge_success_and_failure_events(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, charge_pending_value=Decimal("0"), charged_value=Decimal("0")
+        transaction, charge_pending_value=Decimal(0), charged_value=Decimal(0)
     )
 
 
@@ -502,7 +500,7 @@ def test_with_charge_success_and_older_failure_events(
     )
     failure_event = events[1]
     assert failure_event.type == TransactionEventType.CHARGE_FAILURE
-    failure_event.created_at = timezone.now() - timedelta(minutes=5)
+    failure_event.created_at = timezone.now() - datetime.timedelta(minutes=5)
     failure_event.save()
 
     # when
@@ -512,7 +510,7 @@ def test_with_charge_success_and_older_failure_events(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        charge_pending_value=Decimal("0"),
+        charge_pending_value=Decimal(0),
         charged_value=charge_value,
     )
 
@@ -571,7 +569,7 @@ def test_with_charge_back(transaction_item_generator, transaction_events_generat
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        charge_pending_value=Decimal("0"),
+        charge_pending_value=Decimal(0),
         charged_value=first_charge_value + second_charge_value - charge_back_value,
     )
 
@@ -661,7 +659,7 @@ def test_with_only_refund_failure_event(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, refund_pending_value=Decimal("0"), refunded_value=Decimal("0")
+        transaction, refund_pending_value=Decimal(0), refunded_value=Decimal(0)
     )
 
 
@@ -688,7 +686,7 @@ def test_with_refund_request_and_success_events(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        refund_pending_value=Decimal("0"),
+        refund_pending_value=Decimal(0),
         refunded_value=refund_value,
         charged_value=-refund_value,
     )
@@ -716,7 +714,7 @@ def test_with_refund_request_and_failure_events(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, refund_pending_value=Decimal("0"), refunded_value=Decimal("0")
+        transaction, refund_pending_value=Decimal(0), refunded_value=Decimal(0)
     )
 
 
@@ -742,7 +740,7 @@ def test_with_refund_success_and_failure_events(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, refund_pending_value=Decimal("0"), refunded_value=Decimal("0")
+        transaction, refund_pending_value=Decimal(0), refunded_value=Decimal(0)
     )
 
 
@@ -763,7 +761,7 @@ def test_with_refund_success_and_older_failure_events(
     )
     failure_event = events[1]
     assert failure_event.type == TransactionEventType.REFUND_FAILURE
-    failure_event.created_at = timezone.now() - timedelta(minutes=5)
+    failure_event.created_at = timezone.now() - datetime.timedelta(minutes=5)
     failure_event.save()
 
     # when
@@ -773,7 +771,7 @@ def test_with_refund_success_and_older_failure_events(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        refund_pending_value=Decimal("0"),
+        refund_pending_value=Decimal(0),
         refunded_value=refund_value,
         charged_value=-refund_value,
     )
@@ -816,7 +814,7 @@ def test_with_refund_reverse(transaction_item_generator, transaction_events_gene
     first_refund_value = Decimal("11.00")
     second_refund_value = Decimal("12.00")
     reverse_refund = Decimal("10.00")
-    charged_value = Decimal("40")
+    charged_value = Decimal(40)
     transaction_events_generator(
         transaction=transaction,
         psp_references=["1", "2", "3", "4"],
@@ -841,7 +839,7 @@ def test_with_refund_reverse(transaction_item_generator, transaction_events_gene
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        refund_pending_value=Decimal("0"),
+        refund_pending_value=Decimal(0),
         charged_value=charged_value
         - first_refund_value
         - second_refund_value
@@ -929,7 +927,7 @@ def test_with_only_cancel_failure_event(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, cancel_pending_value=Decimal("0"), canceled_value=Decimal("0")
+        transaction, cancel_pending_value=Decimal(0), canceled_value=Decimal(0)
     )
 
 
@@ -956,7 +954,7 @@ def test_with_cancel_request_and_success_events(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        cancel_pending_value=Decimal("0"),
+        cancel_pending_value=Decimal(0),
         canceled_value=cancel_value,
     )
 
@@ -983,7 +981,7 @@ def test_with_cancel_request_and_failure_events(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, cancel_pending_value=Decimal("0"), canceled_value=Decimal("0")
+        transaction, cancel_pending_value=Decimal(0), canceled_value=Decimal(0)
     )
 
 
@@ -1009,7 +1007,7 @@ def test_with_cancel_success_and_failure_events(
     # then
     transaction.refresh_from_db()
     _assert_amounts(
-        transaction, cancel_pending_value=Decimal("0"), canceled_value=Decimal("0")
+        transaction, cancel_pending_value=Decimal(0), canceled_value=Decimal(0)
     )
 
 
@@ -1030,7 +1028,7 @@ def test_with_cancel_success_and_older_failure_events(
     )
     failure_event = events[1]
     assert failure_event.type == TransactionEventType.CANCEL_FAILURE
-    failure_event.created_at = timezone.now() - timedelta(minutes=5)
+    failure_event.created_at = timezone.now() - datetime.timedelta(minutes=5)
     failure_event.save()
 
     # when
@@ -1040,7 +1038,7 @@ def test_with_cancel_success_and_older_failure_events(
     transaction.refresh_from_db()
     _assert_amounts(
         transaction,
-        cancel_pending_value=Decimal("0"),
+        cancel_pending_value=Decimal(0),
         canceled_value=cancel_value,
     )
 
@@ -1072,6 +1070,36 @@ def test_with_cancel_request_and_success_events_different_psp_references(
         transaction,
         cancel_pending_value=first_cancel_value,
         canceled_value=second_cancel_value,
+    )
+
+
+def test_with_authorization_success_and_refund_success_events(
+    transaction_item_generator, transaction_events_generator
+):
+    # given
+    transaction = transaction_item_generator()
+    authorization_value = Decimal("11.00")
+    refund_value = Decimal("11.00")
+    transaction_events_generator(
+        transaction=transaction,
+        psp_references=["1", "1"],
+        types=[
+            TransactionEventType.AUTHORIZATION_SUCCESS,
+            TransactionEventType.REFUND_SUCCESS,
+        ],
+        amounts=[authorization_value, refund_value],
+    )
+
+    # when
+    recalculate_transaction_amounts(transaction)
+
+    # then
+    transaction.refresh_from_db()
+    _assert_amounts(
+        transaction,
+        authorized_value=authorization_value,
+        refunded_value=authorization_value,
+        charged_value=-authorization_value,
     )
 
 
@@ -1233,10 +1261,10 @@ def test_event_multiple_events_with_auth_charge_and_refund(
 
     authorize_value = Decimal("250.00")
 
-    charged_value = Decimal("200")
-    charged_pending_value = Decimal("50")
-    refunded_value = Decimal("30")
-    ongoing_pending_refund_value = Decimal("15")
+    charged_value = Decimal(200)
+    charged_pending_value = Decimal(50)
+    refunded_value = Decimal(30)
+    ongoing_pending_refund_value = Decimal(15)
 
     transaction_events_generator(
         transaction=transaction,
@@ -1299,10 +1327,10 @@ def test_event_multiple_events_with_auth_charge_and_refund_without_psp_reference
 
     authorize_value = Decimal("250.00")
 
-    charged_value = Decimal("200")
-    charged_pending_value = Decimal("50")
-    refunded_value = Decimal("30")
-    ongoing_pending_refund_value = Decimal("15")
+    charged_value = Decimal(200)
+    charged_pending_value = Decimal(50)
+    refunded_value = Decimal(30)
+    ongoing_pending_refund_value = Decimal(15)
 
     transaction_events_generator(
         transaction=transaction,
@@ -1361,8 +1389,8 @@ def test_event_multiple_events_with_auth_and_cancel(
     authorize_adjustment_value = Decimal("250.00")
 
     canceled_value = Decimal("11.00")
-    cancel_pending_value = Decimal("11")
-    ongoing_pending_value = Decimal("3")
+    cancel_pending_value = Decimal(11)
+    ongoing_pending_value = Decimal(3)
 
     transaction_events_generator(
         transaction=transaction,
@@ -1419,8 +1447,8 @@ def test_event_multiple_events_with_charge_and_refund(
     charged_value = Decimal("250.00")
 
     refunded_value = Decimal("11.00")
-    refund_pending_value = Decimal("15")
-    ongoing_refund_pending_value = Decimal("3")
+    refund_pending_value = Decimal(15)
+    ongoing_refund_pending_value = Decimal(3)
 
     transaction_events_generator(
         transaction=transaction,
@@ -1472,8 +1500,8 @@ def test_event_multiple_events_with_charge_and_failure_refund(
     charged_value = Decimal("250.00")
 
     refunded_value = Decimal("11.00")
-    refund_pending_value = Decimal("15")
-    ongoing_refund_pending_value = Decimal("3")
+    refund_pending_value = Decimal(15)
+    ongoing_refund_pending_value = Decimal(3)
 
     transaction_events_generator(
         transaction=transaction,
@@ -1520,8 +1548,8 @@ def test_event_multiple_events_and_transaction_with_amounts(
     transaction_item_generator, transaction_events_generator
 ):
     # given
-    currently_authorized = Decimal("30")
-    currently_charged = Decimal("200")
+    currently_authorized = Decimal(30)
+    currently_charged = Decimal(200)
     transaction = transaction_item_generator(
         authorized_value=currently_authorized,
         charged_value=currently_charged,
@@ -1529,8 +1557,8 @@ def test_event_multiple_events_and_transaction_with_amounts(
     charged_value = Decimal("20.00")
 
     refunded_value = Decimal("11.00")
-    refund_pending_value = Decimal("15")
-    ongoing_refund_pending_value = Decimal("3")
+    refund_pending_value = Decimal(15)
+    ongoing_refund_pending_value = Decimal(3)
 
     transaction_events_generator(
         transaction=transaction,
@@ -1564,7 +1592,7 @@ def test_event_multiple_events_and_transaction_with_amounts(
 
     total_charged = max(
         (currently_charged + charged_value - total_refuned - total_pending_refund),
-        Decimal("0"),
+        Decimal(0),
     )
 
     transaction.refresh_from_db()
@@ -1630,7 +1658,7 @@ def test_recalculate_transaction_amounts_updates_transaction_modified_at(
     )
     # when
     with freeze_time("2023-03-18 12:00:00"):
-        calculation_time = datetime.datetime.now(pytz.UTC)
+        calculation_time = datetime.datetime.now(tz=datetime.UTC)
         recalculate_transaction_amounts(transaction)
 
     # then

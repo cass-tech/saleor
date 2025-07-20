@@ -6,13 +6,11 @@ from ...permission.enums import (
     PaymentPermissions,
 )
 from ..core import ResolveInfo
-from ..core.connection import create_connection_slice, filter_connection_queryset
-from ..core.descriptions import (
-    ADDED_IN_31,
-    ADDED_IN_34,
-    DEPRECATED_IN_3X_FIELD,
-    DEPRECATED_IN_3X_INPUT,
+from ..core.connection import (
+    create_connection_slice_for_sync_webhook_control_context,
+    filter_connection_queryset,
 )
+from ..core.descriptions import DEPRECATED_IN_3X_INPUT
 from ..core.doc_category import DOC_CATEGORY_CHECKOUT
 from ..core.fields import BaseField, ConnectionField, FilterConnectionField
 from ..core.scalars import UUID
@@ -26,6 +24,7 @@ from .mutations import (
     CheckoutCreateFromOrder,
     CheckoutCustomerAttach,
     CheckoutCustomerDetach,
+    CheckoutCustomerNoteUpdate,
     CheckoutDeliveryMethodUpdate,
     CheckoutEmailUpdate,
     CheckoutLanguageCodeUpdate,
@@ -57,9 +56,7 @@ class CheckoutQueries(graphene.ObjectType):
             f"{AccountPermissions.IMPERSONATE_USER.name}, "
             f"{PaymentPermissions.HANDLE_PAYMENTS.name}. "
         ),
-        id=graphene.Argument(
-            graphene.ID, description="The checkout's ID." + ADDED_IN_34
-        ),
+        id=graphene.Argument(graphene.ID, description="The checkout's ID."),
         token=graphene.Argument(
             UUID,
             description=(
@@ -71,10 +68,8 @@ class CheckoutQueries(graphene.ObjectType):
     # FIXME we could optimize the below field
     checkouts = FilterConnectionField(
         CheckoutCountableConnection,
-        sort_by=CheckoutSortingInput(description="Sort checkouts." + ADDED_IN_31),
-        filter=CheckoutFilterInput(
-            description="Filtering options for checkouts." + ADDED_IN_31
-        ),
+        sort_by=CheckoutSortingInput(description="Sort checkouts."),
+        filter=CheckoutFilterInput(description="Filtering options for checkouts."),
         channel=graphene.String(
             description="Slug of a channel for which the data should be returned."
         ),
@@ -82,12 +77,20 @@ class CheckoutQueries(graphene.ObjectType):
             CheckoutPermissions.MANAGE_CHECKOUTS,
             PaymentPermissions.HANDLE_PAYMENTS,
         ],
-        description="List of checkouts.",
+        description=(
+            "List of checkouts. The query will not initiate any external requests, "
+            "including fetching external shipping methods, filtering available "
+            "shipping methods, or performing external tax calculations."
+        ),
         doc_category=DOC_CATEGORY_CHECKOUT,
     )
     checkout_lines = ConnectionField(
         CheckoutLineCountableConnection,
-        description="List of checkout lines.",
+        description=(
+            "List of checkout lines. The query will not initiate any external "
+            "requests, including fetching external shipping methods, filtering "
+            "available shipping methods, or performing external tax calculations."
+        ),
         permissions=[
             CheckoutPermissions.MANAGE_CHECKOUTS,
         ],
@@ -104,13 +107,15 @@ class CheckoutQueries(graphene.ObjectType):
         qs = filter_connection_queryset(
             qs, kwargs, allow_replica=info.context.allow_replica
         )
-        return create_connection_slice(qs, info, kwargs, CheckoutCountableConnection)
+        return create_connection_slice_for_sync_webhook_control_context(
+            qs, info, kwargs, CheckoutCountableConnection, allow_sync_webhooks=False
+        )
 
     @staticmethod
     def resolve_checkout_lines(_root, info: ResolveInfo, **kwargs):
         qs = resolve_checkout_lines(info)
-        return create_connection_slice(
-            qs, info, kwargs, CheckoutLineCountableConnection
+        return create_connection_slice_for_sync_webhook_control_context(
+            qs, info, kwargs, CheckoutLineCountableConnection, allow_sync_webhooks=False
         )
 
 
@@ -122,11 +127,10 @@ class CheckoutMutations(graphene.ObjectType):
     checkout_create_from_order = CheckoutCreateFromOrder.Field()
     checkout_customer_attach = CheckoutCustomerAttach.Field()
     checkout_customer_detach = CheckoutCustomerDetach.Field()
+    checkout_customer_note_update = CheckoutCustomerNoteUpdate.Field()
     checkout_email_update = CheckoutEmailUpdate.Field()
     checkout_line_delete = CheckoutLineDelete.Field(
-        deprecation_reason=(
-            f"{DEPRECATED_IN_3X_FIELD} Use `checkoutLinesDelete` instead."
-        )
+        deprecation_reason="Use `checkoutLinesDelete` instead."
     )
     checkout_lines_delete = CheckoutLinesDelete.Field()
     checkout_lines_add = CheckoutLinesAdd.Field()
@@ -135,9 +139,7 @@ class CheckoutMutations(graphene.ObjectType):
     checkout_payment_create = CheckoutPaymentCreate.Field()
     checkout_shipping_address_update = CheckoutShippingAddressUpdate.Field()
     checkout_shipping_method_update = CheckoutShippingMethodUpdate.Field(
-        deprecation_reason=(
-            f"{DEPRECATED_IN_3X_FIELD} Use `checkoutDeliveryMethodUpdate` instead."
-        )
+        deprecation_reason="Use `checkoutDeliveryMethodUpdate` instead."
     )
     checkout_delivery_method_update = CheckoutDeliveryMethodUpdate.Field()
     checkout_language_code_update = CheckoutLanguageCodeUpdate.Field()

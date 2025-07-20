@@ -5,7 +5,6 @@ from typing import Optional
 from uuid import uuid4
 
 import graphene
-import pytz
 from django.conf import settings
 from django.contrib.postgres.indexes import BTreeIndex, GinIndex
 from django.contrib.postgres.search import SearchVectorField
@@ -15,14 +14,13 @@ from django.db.models import JSONField, TextField
 from django.urls import reverse
 from django.utils import timezone
 from django_measurement.models import MeasurementField
-from django_prices.models import MoneyField
 from measurement.measures import Weight
 from mptt.managers import TreeManager
 from mptt.models import MPTTModel
 from prices import Money
 
 from ..channel.models import Channel
-from ..core.db.fields import SanitizedJSONField
+from ..core.db.fields import MoneyField, SanitizedJSONField
 from ..core.models import (
     ModelWithExternalReference,
     ModelWithMetadata,
@@ -41,7 +39,7 @@ from ..permission.enums import (
     ProductPermissions,
     ProductTypePermissions,
 )
-from ..seo.models import SeoModel, SeoModelTranslation
+from ..seo.models import SeoModel, SeoModelTranslationWithSlug
 from ..tax.models import TaxClass
 from . import ProductMediaTypes, ProductTypeKind, managers
 
@@ -87,7 +85,7 @@ class Category(ModelWithMetadata, MPTTModel, SeoModel):
         return self.name
 
 
-class CategoryTranslation(SeoModelTranslation):
+class CategoryTranslation(SeoModelTranslationWithSlug):
     category = models.ForeignKey(
         Category, related_name="translations", on_delete=models.CASCADE
     )
@@ -95,6 +93,12 @@ class CategoryTranslation(SeoModelTranslation):
     description = SanitizedJSONField(blank=True, null=True, sanitizer=clean_editor_js)
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["language_code", "slug"],
+                name="uniq_lang_slug_categorytransl",
+            ),
+        ]
         unique_together = (("language_code", "category"),)
 
     def __str__(self) -> str:
@@ -231,6 +235,9 @@ class Product(SeoModel, ModelWithMetadata, ModelWithExternalReference):
                 fields=["name", "slug"],
                 opclasses=["gin_trgm_ops"] * 2,
             ),
+            models.Index(
+                fields=["category_id", "slug"],
+            ),
         ]
         indexes.extend(ModelWithMetadata.Meta.indexes)
 
@@ -256,7 +263,7 @@ class Product(SeoModel, ModelWithMetadata, ModelWithExternalReference):
         return ["concatenated_values_order", "concatenated_values", "name"]
 
 
-class ProductTranslation(SeoModelTranslation):
+class ProductTranslation(SeoModelTranslationWithSlug):
     product = models.ForeignKey(
         Product, related_name="translations", on_delete=models.CASCADE
     )
@@ -264,6 +271,12 @@ class ProductTranslation(SeoModelTranslation):
     description = SanitizedJSONField(blank=True, null=True, sanitizer=clean_editor_js)
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["language_code", "slug"],
+                name="uniq_lang_slug_producttransl",
+            ),
+        ]
         unique_together = (("language_code", "product"),)
 
     def __str__(self) -> str:
@@ -327,7 +340,7 @@ class ProductChannelListing(PublishableModel):
     def is_available_for_purchase(self):
         return (
             self.available_for_purchase_at is not None
-            and datetime.datetime.now(pytz.UTC) >= self.available_for_purchase_at
+            and datetime.datetime.now(tz=datetime.UTC) >= self.available_for_purchase_at
         )
 
 
@@ -362,6 +375,14 @@ class ProductVariant(SortableModel, ModelWithMetadata, ModelWithExternalReferenc
     class Meta(ModelWithMetadata.Meta):
         ordering = ("sort_order", "sku")
         app_label = "product"
+        indexes = [
+            *ModelWithMetadata.Meta.indexes,
+            GinIndex(
+                name="variant_gin",
+                fields=["name", "sku"],
+                opclasses=["gin_trgm_ops"] * 2,
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.name or self.sku or f"ID:{self.pk}"
@@ -385,22 +406,31 @@ class ProductVariant(SortableModel, ModelWithMetadata, ModelWithExternalReferenc
         self,
         channel_listing: "ProductVariantChannelListing",
         price_override: Optional["Decimal"] = None,
-        promotion_rules: Optional[Iterable["PromotionRule"]] = None,
+        promotion_rules: Iterable["PromotionRule"] | None = None,
     ) -> "Money":
         """Return the variant discounted price with applied promotions.
 
         If a custom price is provided, return the price with applied discounts from
         valid promotion rules for this variant.
         """
-        from ..discount.utils import calculate_discounted_price_for_rules
+        from ..discount.utils.promotion import calculate_discounted_price_for_rules
 
         if price_override is None:
             return channel_listing.discounted_price or channel_listing.price
-        price: "Money" = self.get_base_price(channel_listing, price_override)
+        price: Money = self.get_base_price(channel_listing, price_override)
         rules = promotion_rules or []
         return calculate_discounted_price_for_rules(
             price=price, rules=rules, currency=channel_listing.currency
         )
+
+    def get_prior_price_amount(
+        self,
+        channel_listing: Optional["ProductVariantChannelListing"],
+    ) -> Decimal | None:
+        if channel_listing is None or channel_listing.prior_price is None:
+            return None
+
+        return channel_listing.prior_price.amount
 
     def get_weight(self):
         return self.weight or self.product.weight or self.product.product_type.weight
@@ -417,7 +447,7 @@ class ProductVariant(SortableModel, ModelWithMetadata, ModelWithExternalReferenc
 
     def display_product(self, translated: bool = False) -> str:
         if translated:
-            product = get_translation(self.product).name
+            product = get_translation(self.product).name or ""
             variant_display = get_translation(self).name
         else:
             variant_display = str(self)
@@ -490,6 +520,16 @@ class ProductVariantChannelListing(models.Model):
         null=True,
     )
     cost_price = MoneyField(amount_field="cost_price_amount", currency_field="currency")
+
+    prior_price_amount = models.DecimalField(
+        max_digits=settings.DEFAULT_MAX_DIGITS,
+        decimal_places=settings.DEFAULT_DECIMAL_PLACES,
+        blank=True,
+        null=True,
+    )
+    prior_price = MoneyField(
+        amount_field="prior_price_amount", currency_field="currency"
+    )
 
     discounted_price_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
@@ -581,9 +621,14 @@ class DigitalContentUrl(models.Model):
     ):
         if not self.token:
             self.token = str(uuid4()).replace("-", "")
-        super().save(force_insert, force_update, using, update_fields)
+        super().save(
+            force_insert=force_insert,
+            force_update=force_update,
+            using=using,
+            update_fields=update_fields,
+        )
 
-    def get_absolute_url(self) -> Optional[str]:
+    def get_absolute_url(self) -> str | None:
         url = reverse("digital-product", kwargs={"token": str(self.token)})
         return build_absolute_uri(url)
 
@@ -706,7 +751,7 @@ class CollectionChannelListing(PublishableModel):
         ordering = ("pk",)
 
 
-class CollectionTranslation(SeoModelTranslation):
+class CollectionTranslation(SeoModelTranslationWithSlug):
     collection = models.ForeignKey(
         Collection, related_name="translations", on_delete=models.CASCADE
     )
@@ -714,6 +759,12 @@ class CollectionTranslation(SeoModelTranslation):
     description = SanitizedJSONField(blank=True, null=True, sanitizer=clean_editor_js)
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["language_code", "slug"],
+                name="uniq_lang_slug_collectiontransl",
+            ),
+        ]
         unique_together = (("language_code", "collection"),)
 
     def __repr__(self):

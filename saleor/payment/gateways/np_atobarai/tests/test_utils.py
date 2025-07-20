@@ -105,7 +105,11 @@ def test_get_shipping_company_code_no_metadata(
 
 @pytest.mark.parametrize(
     ("config_shipping_company_code", "result_shipping_company_code"),
-    zip(SHIPPING_COMPANY_CODES + ["invalid_code"], SHIPPING_COMPANY_CODES + [None]),
+    zip(
+        SHIPPING_COMPANY_CODES + ["invalid_code"],
+        SHIPPING_COMPANY_CODES + [None],
+        strict=False,
+    ),
 )
 def test_get_shipping_company_code_valid_metadata(
     config, fulfillment, config_shipping_company_code, result_shipping_company_code
@@ -197,7 +201,7 @@ def test_create_refunded_lines_fulfillment_lines(fulfilled_order):
     }
 
 
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 @pytest.mark.parametrize("previous_refund_shipping_costs", [True, False])
 def test_create_refunded_lines_previously_refunded_order_lines(
     _mocked_refund,
@@ -243,7 +247,7 @@ def test_create_refunded_lines_previously_refunded_order_lines(
     assert lines == {line.line.variant_id: line.quantity for line in order_refund_lines}
 
 
-@patch("saleor.order.actions.gateway.refund")
+@patch("saleor.payment.gateway.refund")
 @pytest.mark.parametrize("previous_refund_shipping_costs", [True, False])
 def test_create_refunded_lines_previously_refunded_fulfillment_lines(
     _mocked_refund,

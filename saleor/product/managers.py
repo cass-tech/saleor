@@ -1,7 +1,6 @@
 import datetime
-from typing import Optional, Union
+from typing import Union
 
-import pytz
 from django.contrib.postgres.aggregates import StringAgg
 from django.db import models
 from django.db.models import (
@@ -33,7 +32,7 @@ class ProductsQueryset(models.QuerySet):
 
         if not channel.is_active:
             return self.none()
-        today = datetime.datetime.now(pytz.UTC)
+        today = datetime.datetime.now(tz=datetime.UTC)
         channel_listings = (
             ProductChannelListing.objects.using(self.db)
             .filter(
@@ -46,7 +45,7 @@ class ProductsQueryset(models.QuerySet):
         return self.filter(Exists(channel_listings.filter(product_id=OuterRef("pk"))))
 
     def not_published(self, channel: Channel):
-        today = datetime.datetime.now(pytz.UTC)
+        today = datetime.datetime.now(tz=datetime.UTC)
         return self.annotate_publication_info(channel).filter(
             Q(published_at__gt=today) & Q(is_published=True)
             | Q(is_published=False)
@@ -76,7 +75,7 @@ class ProductsQueryset(models.QuerySet):
     def visible_to_user(
         self,
         requestor: Union["User", "App", None],
-        channel: Optional[Channel],
+        channel: Channel | None,
         limited_channel_access: bool,
     ):
         """Determine which products should be visible to user.
@@ -140,7 +139,7 @@ class ProductsQueryset(models.QuerySet):
             published_at=ExpressionWrapper(query, output_field=DateTimeField())
         )
 
-    def annotate_visible_in_listings(self, channel: Optional[Channel]):
+    def annotate_visible_in_listings(self, channel: Channel | None):
         from .models import ProductChannelListing
 
         if not channel:
@@ -156,9 +155,7 @@ class ProductsQueryset(models.QuerySet):
             visible_in_listings=ExpressionWrapper(query, output_field=BooleanField())
         )
 
-    def sort_by_attribute(
-        self, attribute_pk: Union[int, str], descending: bool = False
-    ):
+    def sort_by_attribute(self, attribute_pk: int | str, descending: bool = False):
         """Sort a query set by the values of the given product attribute.
 
         :param attribute_pk: The database ID (must be a numeric) of the attribute
@@ -297,7 +294,7 @@ class ProductVariantQueryset(models.QuerySet):
             ),
         )
 
-    def available_in_channel(self, channel: Optional[Channel]):
+    def available_in_channel(self, channel: Channel | None):
         from .models import ProductVariantChannelListing
 
         if not channel:
@@ -315,6 +312,48 @@ class ProductVariantQueryset(models.QuerySet):
             "attributes__assignment__attribute",
             "variant_media__media",
         )
+
+    def visible_to_user(
+        self,
+        requestor: Union["User", "App", None],
+        channel: Channel | None,
+        limited_channel_access: bool,
+    ):
+        from .models import ALL_PRODUCTS_PERMISSIONS
+
+        # User with product permissions can see all variants. If channel is given,
+        # filter variants with product channel listings for this channel.
+        if has_one_of_permissions(requestor, ALL_PRODUCTS_PERMISSIONS):
+            if limited_channel_access:
+                if channel:
+                    return self.filter(product__channel_listings__channel_id=channel.id)
+                return self.none()
+            return self.all()
+
+        # If user has no permissions (customer) and channel is not given or is inactive,
+        # return no variants.
+        if not channel or not channel.is_active:
+            return self.none()
+
+        # If user has no permissions (customer) and channel is given, return variants
+        # that:
+        # - have a variant channel listing for this channel and the price is not null
+        # - have a product channel listing for this channel and the product is published
+        #  and visible in listings
+        variants = self.filter(
+            channel_listings__channel_id=channel.id,
+            channel_listings__price_amount__isnull=False,
+        )
+
+        today = datetime.datetime.now(tz=datetime.UTC)
+        variants = variants.filter(
+            Q(product__channel_listings__published_at__lte=today)
+            | Q(product__channel_listings__published_at__isnull=True),
+            product__channel_listings__is_published=True,
+            product__channel_listings__channel_id=channel.id,
+            product__channel_listings__visible_in_listings=True,
+        )
+        return variants
 
 
 ProductVariantManager = models.Manager.from_queryset(ProductVariantQueryset)
@@ -336,7 +375,7 @@ ProductVariantChannelListingManager = models.Manager.from_queryset(
 
 class CollectionsQueryset(models.QuerySet):
     def published(self, channel_slug: str):
-        today = datetime.datetime.now(pytz.UTC)
+        today = datetime.datetime.now(tz=datetime.UTC)
         return self.filter(
             Q(channel_listings__published_at__lte=today)
             | Q(channel_listings__published_at__isnull=True),
@@ -346,7 +385,7 @@ class CollectionsQueryset(models.QuerySet):
         )
 
     def visible_to_user(
-        self, requestor: Union["User", "App", None], channel_slug: Optional[str]
+        self, requestor: Union["User", "App", None], channel_slug: str | None
     ):
         from .models import ALL_PRODUCTS_PERMISSIONS
 

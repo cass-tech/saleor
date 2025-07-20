@@ -1,11 +1,11 @@
 import graphene
 
-from .....discount.utils import mark_active_catalogue_promotion_rules_as_dirty
+from .....discount.utils.promotion import mark_active_catalogue_promotion_rules_as_dirty
 from .....permission.enums import ProductPermissions
 from .....product import models
 from .....product.tasks import collection_product_updated_task
-from ....channel import ChannelContext
 from ....core import ResolveInfo
+from ....core.context import ChannelContext
 from ....core.mutations import ModelDeleteMutation
 from ....core.types import CollectionError
 from ....plugins.dataloaders import get_plugin_manager_promise

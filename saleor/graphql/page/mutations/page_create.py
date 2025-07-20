@@ -1,7 +1,6 @@
-from datetime import datetime
+import datetime
 
 import graphene
-import pytz
 from django.core.exceptions import ValidationError
 
 from ....core.tracing import traced_atomic_transaction
@@ -9,12 +8,14 @@ from ....page import models
 from ....page.error_codes import PageErrorCode
 from ....permission.enums import PagePermissions
 from ...attribute.types import AttributeValueInput
-from ...attribute.utils import PageAttributeAssignmentMixin
+from ...attribute.utils.attribute_assignment import AttributeAssignmentMixin
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_33, DEPRECATED_IN_3X_INPUT, RICH_CONTENT
+from ...core.context import ChannelContext
+from ...core.descriptions import DEPRECATED_IN_3X_INPUT, RICH_CONTENT
 from ...core.doc_category import DOC_CATEGORY_PAGES
 from ...core.fields import JSONString
-from ...core.mutations import ModelMutation
+from ...core.mutations import DeprecatedModelMutation
+from ...core.scalars import DateTime
 from ...core.types import BaseInputObjectType, NonNullList, PageError, SeoInput
 from ...core.validators import clean_seo_fields, validate_slug_and_generate_if_needed
 from ...plugins.dataloaders import get_plugin_manager_promise
@@ -35,9 +36,7 @@ class PageInput(BaseInputObjectType):
             "Use `publishedAt` field instead."
         )
     )
-    published_at = graphene.DateTime(
-        description="Publication date time. ISO 8601 standard." + ADDED_IN_33
-    )
+    published_at = DateTime(description="Publication date time. ISO 8601 standard.")
     seo = SeoInput(description="Search engine optimization fields.")
 
     class Meta:
@@ -53,7 +52,7 @@ class PageCreateInput(PageInput):
         doc_category = DOC_CATEGORY_PAGES
 
 
-class PageCreate(ModelMutation):
+class PageCreate(DeprecatedModelMutation):
     class Arguments:
         input = PageCreateInput(
             required=True, description="Fields required to create a page."
@@ -68,9 +67,9 @@ class PageCreate(ModelMutation):
         error_type_field = "page_errors"
 
     @classmethod
-    def clean_attributes(cls, attributes: dict, page_type: models.PageType):
+    def clean_attributes(cls, attributes: list[dict], page_type: models.PageType):
         attributes_qs = page_type.page_attributes.prefetch_related("values")
-        cleaned_attributes = PageAttributeAssignmentMixin.clean_input(
+        cleaned_attributes = AttributeAssignmentMixin.clean_input(
             attributes, attributes_qs, is_page_attributes=True
         )
         return cleaned_attributes
@@ -82,9 +81,9 @@ class PageCreate(ModelMutation):
             cleaned_input = validate_slug_and_generate_if_needed(
                 instance, "title", cleaned_input
             )
-        except ValidationError as error:
-            error.code = PageErrorCode.REQUIRED.value
-            raise ValidationError({"slug": error})
+        except ValidationError as e:
+            e.code = PageErrorCode.REQUIRED.value
+            raise ValidationError({"slug": e}) from e
 
         if "publication_date" in cleaned_input and "published_at" in cleaned_input:
             raise ValidationError(
@@ -102,7 +101,7 @@ class PageCreate(ModelMutation):
             "publication_date"
         )
         if is_published and not publication_date:
-            cleaned_input["published_at"] = datetime.now(pytz.UTC)
+            cleaned_input["published_at"] = datetime.datetime.now(tz=datetime.UTC)
         elif "publication_date" in cleaned_input or "published_at" in cleaned_input:
             cleaned_input["published_at"] = publication_date
 
@@ -115,8 +114,8 @@ class PageCreate(ModelMutation):
                 cleaned_input["attributes"] = cls.clean_attributes(
                     attributes, page_type
                 )
-            except ValidationError as exc:
-                raise ValidationError({"attributes": exc})
+            except ValidationError as e:
+                raise ValidationError({"attributes": e}) from e
 
         clean_seo_fields(cleaned_input)
 
@@ -129,10 +128,16 @@ class PageCreate(ModelMutation):
 
             attributes = cleaned_data.get("attributes")
             if attributes:
-                PageAttributeAssignmentMixin.save(instance, attributes)
+                AttributeAssignmentMixin.save(instance, attributes)
 
     @classmethod
     def save(cls, info: ResolveInfo, instance, cleaned_input):
         super().save(info, instance, cleaned_input)
         manager = get_plugin_manager_promise(info.context).get()
         cls.call_event(manager.page_created, instance)
+
+    @classmethod
+    def success_response(cls, instance):
+        response = super().success_response(instance)
+        response.page = ChannelContext(instance, channel_slug=None)
+        return response

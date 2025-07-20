@@ -1,4 +1,4 @@
-from typing import Any, Union, cast
+from typing import Any, cast
 
 import graphene
 from django.core.exceptions import ValidationError
@@ -9,12 +9,8 @@ from ....order import OrderGrantedRefundStatus, models
 from ....order.utils import update_order_charge_data
 from ....permission.enums import OrderPermissions
 from ...core import ResolveInfo
-from ...core.descriptions import (
-    ADDED_IN_313,
-    ADDED_IN_315,
-    ADDED_IN_320,
-    PREVIEW_FEATURE,
-)
+from ...core.context import SyncWebhookControlContext
+from ...core.descriptions import ADDED_IN_320, PREVIEW_FEATURE
 from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.mutations import BaseMutation
 from ...core.scalars import Decimal
@@ -46,16 +42,12 @@ class OrderGrantRefundUpdateError(Error):
 
     add_lines = NonNullList(
         OrderGrantRefundUpdateLineError,
-        description="List of lines to add which cause the error."
-        + ADDED_IN_315
-        + PREVIEW_FEATURE,
+        description="List of lines to add which cause the error.",
         required=False,
     )
     remove_lines = NonNullList(
         OrderGrantRefundUpdateLineError,
-        description="List of lines to remove which cause the error."
-        + ADDED_IN_315
-        + PREVIEW_FEATURE,
+        description="List of lines to remove which cause the error.",
         required=False,
     )
 
@@ -85,22 +77,16 @@ class OrderGrantRefundUpdateInput(BaseInputObjectType):
     reason = graphene.String(description="Reason of the granted refund.")
     add_lines = NonNullList(
         OrderGrantRefundUpdateLineAddInput,
-        description="Lines to assign to granted refund."
-        + ADDED_IN_315
-        + PREVIEW_FEATURE,
+        description="Lines to assign to granted refund.",
         required=False,
     )
     remove_lines = NonNullList(
         graphene.ID,
-        description="Lines to remove from granted refund."
-        + ADDED_IN_315
-        + PREVIEW_FEATURE,
+        description="Lines to remove from granted refund.",
         required=False,
     )
     grant_refund_for_shipping = graphene.Boolean(
-        description="Determine if granted refund should include shipping costs."
-        + ADDED_IN_315
-        + PREVIEW_FEATURE,
+        description="Determine if granted refund should include shipping costs.",
         required=False,
     )
     transaction_id = graphene.ID(
@@ -138,7 +124,7 @@ class OrderGrantRefundUpdate(BaseMutation):
         )
 
     class Meta:
-        description = "Updates granted refund." + ADDED_IN_313 + PREVIEW_FEATURE
+        description = "Updates granted refund."
         permissions = (OrderPermissions.MANAGE_ORDERS,)
         error_type_class = OrderGrantRefundUpdateError
         doc_category = DOC_CATEGORY_ORDERS
@@ -176,8 +162,7 @@ class OrderGrantRefundUpdate(BaseMutation):
             and not only_reason_provided
         ):
             fields_from_input = set(input.keys())
-            if "reason" in fields_from_input:
-                fields_from_input.remove("reason")
+            fields_from_input.discard("reason")
             error_msg = (
                 "Only reason can be updated when `OrderGrantedRefund.status` is PENDING"
                 " or SUCCESS."
@@ -235,7 +220,7 @@ class OrderGrantRefundUpdate(BaseMutation):
     def clean_add_lines(
         cls,
         order: models.Order,
-        lines: list[dict[str, Union[str, int]]],
+        lines: list[dict[str, str | int]],
         errors: list[dict[str, Any]],
         line_ids_exclude: list[int],
     ) -> list[models.OrderGrantedRefundLine]:
@@ -438,4 +423,7 @@ class OrderGrantRefundUpdate(BaseMutation):
         cleaned_input = cls.clean_input(info, granted_refund, input)
         cls.process_update_for_granted_refund(order, granted_refund, cleaned_input)
         update_order_charge_data(order)
-        return cls(order=order, granted_refund=granted_refund)
+        return cls(
+            order=SyncWebhookControlContext(order),
+            granted_refund=SyncWebhookControlContext(granted_refund),
+        )

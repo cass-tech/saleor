@@ -1,6 +1,6 @@
 import uuid
 from functools import partial
-from typing import Optional, cast
+from typing import cast
 
 import graphene
 from django.contrib.auth import get_user_model
@@ -10,7 +10,7 @@ from promise import Promise
 from ...account import models
 from ...checkout.utils import get_user_checkout
 from ...core.exceptions import PermissionDenied
-from ...graphql.meta.inputs import MetadataInput
+from ...graphql.meta.inputs import MetadataInput, MetadataInputDescription
 from ...order import OrderStatus
 from ...payment.interface import ListStoredPaymentMethodsRequestData
 from ...permission.auth_filters import AuthorizationFilters
@@ -29,21 +29,18 @@ from ..channel.types import Channel
 from ..checkout.dataloaders import CheckoutByUserAndChannelLoader, CheckoutByUserLoader
 from ..checkout.types import Checkout, CheckoutCountableConnection
 from ..core import ResolveInfo
-from ..core.connection import CountableConnection, create_connection_slice
-from ..core.context import get_database_connection_name
-from ..core.descriptions import (
-    ADDED_IN_38,
-    ADDED_IN_310,
-    ADDED_IN_314,
-    ADDED_IN_315,
-    DEPRECATED_IN_3X_FIELD,
-    PREVIEW_FEATURE,
+from ..core.connection import (
+    CountableConnection,
+    create_connection_slice,
+    create_connection_slice_for_sync_webhook_control_context,
 )
+from ..core.context import SyncWebhookControlContext, get_database_connection_name
+from ..core.descriptions import ADDED_IN_319, PREVIEW_FEATURE
 from ..core.doc_category import DOC_CATEGORY_USERS
 from ..core.enums import LanguageCodeEnum
 from ..core.federation import federated_entity, resolve_federation_references
 from ..core.fields import ConnectionField, PermissionsField
-from ..core.scalars import UUID
+from ..core.scalars import UUID, DateTime
 from ..core.tracing import traced_resolver
 from ..core.types import (
     BaseInputObjectType,
@@ -53,12 +50,13 @@ from ..core.types import (
     ModelObjectType,
     NonNullList,
     Permission,
+    SecureGlobalID,
     ThumbnailField,
 )
 from ..core.utils import from_global_id_or_error, str_to_enum, to_global_id_or_none
 from ..giftcard.dataloaders import GiftCardsByUserLoader
 from ..meta.types import ObjectWithMetadata
-from ..order.dataloaders import OrderLineByIdLoader, OrdersByUserLoader
+from ..order.dataloaders import OrderByIdLoader, OrderLineByIdLoader, OrdersByUserLoader
 from ..payment.types import StoredPaymentMethod
 from ..plugins.dataloaders import get_plugin_manager_promise
 from ..utils import format_permissions_for_display, get_user_or_app_from_context
@@ -92,10 +90,25 @@ class AddressInput(BaseInputObjectType):
             "[libphonenumber](https://github.com/google/libphonenumber) library."
         )
     )
-
     metadata = graphene.List(
         graphene.NonNull(MetadataInput),
-        description="Address public metadata." + ADDED_IN_315,
+        description=(
+            f"Address public metadata. {MetadataInputDescription.PUBLIC_METADATA_INPUT}"
+        ),
+        required=False,
+    )
+    skip_validation = graphene.Boolean(
+        description=(
+            "Determine if the address should be validated. "
+            "By default, Saleor accepts only address inputs matching ruleset from "
+            "[Google Address Data]{https://chromium-i18n.appspot.com/ssl-address), "
+            "using [i18naddress](https://github.com/mirumee/google-i18n-address) "
+            "library. Some mutations may require additional permissions to use the "
+            "the field. More info about permissions can be found in relevant mutation."
+        )
+        + ADDED_IN_319
+        + PREVIEW_FEATURE,
+        default_value=False,
         required=False,
     )
 
@@ -143,7 +156,6 @@ class Address(ModelObjectType[models.Address]):
         description = "Represents user address data."
         interfaces = [relay.Node, ObjectWithMetadata]
         model = models.Address
-        metadata_since = ADDED_IN_310
 
     @staticmethod
     def resolve_country(root: models.Address, _info: ResolveInfo):
@@ -208,9 +220,7 @@ class Address(ModelObjectType[models.Address]):
 
 class CustomerEvent(ModelObjectType[models.CustomerEvent]):
     id = graphene.GlobalID(required=True, description="The ID of the customer event.")
-    date = graphene.types.datetime.DateTime(
-        description="Date when event happened at in ISO 8601 format."
-    )
+    date = DateTime(description="Date when event happened at in ISO 8601 format.")
     type = CustomerEventsEnum(description="Customer event type.")
     user = graphene.Field(lambda: User, description="User who performed the action.")
     app = graphene.Field(App, description="App that performed the action.")
@@ -264,10 +274,31 @@ class CustomerEvent(ModelObjectType[models.CustomerEvent]):
         return root.parameters.get("count", None)
 
     @staticmethod
+    def resolve_order(root: models.CustomerEvent, info: ResolveInfo):
+        def _wrap_with_sync_webhook_control_context(order):
+            return SyncWebhookControlContext(node=order, allow_sync_webhooks=False)
+
+        if root.order_id:
+            return (
+                OrderByIdLoader(info.context)
+                .load(root.order_id)
+                .then(_wrap_with_sync_webhook_control_context)
+            )
+        return None
+
+    @staticmethod
     def resolve_order_line(root: models.CustomerEvent, info: ResolveInfo):
         if "order_line_pk" in root.parameters:
-            return OrderLineByIdLoader(info.context).load(
-                uuid.UUID(root.parameters["order_line_pk"])
+
+            def _wrap_with_sync_webhook_control_context(line):
+                if not line:
+                    return None
+                return SyncWebhookControlContext(node=line, allow_sync_webhooks=False)
+
+            return (
+                OrderLineByIdLoader(info.context)
+                .load(uuid.UUID(root.parameters["order_line_pk"]))
+                .then(_wrap_with_sync_webhook_control_context)
             )
         return None
 
@@ -301,7 +332,7 @@ class UserPermission(Permission):
 @federated_entity("id")
 @federated_entity("email")
 class User(ModelObjectType[models.User]):
-    id = graphene.GlobalID(required=True, description="The ID of the user.")
+    id = SecureGlobalID(required=True, description="The ID of the user.")
     email = graphene.String(required=True, description="The email address of the user.")
     first_name = graphene.String(
         required=True, description="The given name of the address."
@@ -317,7 +348,7 @@ class User(ModelObjectType[models.User]):
     )
     is_confirmed = graphene.Boolean(
         required=True,
-        description="Determines if user has confirmed email." + ADDED_IN_315,
+        description="Determines if user has confirmed email.",
     )
     addresses = NonNullList(
         Address, description="List of all user's addresses.", required=True
@@ -325,10 +356,7 @@ class User(ModelObjectType[models.User]):
     checkout = graphene.Field(
         Checkout,
         description="Returns the last open checkout of this user.",
-        deprecation_reason=(
-            f"{DEPRECATED_IN_3X_FIELD} "
-            "Use the `checkoutTokens` field to fetch the user checkouts."
-        ),
+        deprecation_reason="Use the `checkoutTokens` field to fetch the user checkouts.",
     )
     checkout_tokens = NonNullList(
         UUID,
@@ -336,7 +364,7 @@ class User(ModelObjectType[models.User]):
         channel=graphene.String(
             description="Slug of a channel for which the data should be returned."
         ),
-        deprecation_reason=(f"{DEPRECATED_IN_3X_FIELD} Use `checkoutIds` instead."),
+        deprecation_reason="Use `checkoutIds` instead.",
     )
     checkout_ids = NonNullList(
         graphene.ID,
@@ -347,7 +375,12 @@ class User(ModelObjectType[models.User]):
     )
     checkouts = ConnectionField(
         CheckoutCountableConnection,
-        description="Returns checkouts assigned to this user." + ADDED_IN_38,
+        description=(
+            "Returns checkouts assigned to this user. The query will not initiate any "
+            "external requests, including fetching external shipping methods, "
+            "filtering available shipping methods, or performing external tax "
+            "calculations."
+        ),
         channel=graphene.String(
             description="Slug of a channel for which the data should be returned."
         ),
@@ -364,7 +397,10 @@ class User(ModelObjectType[models.User]):
     orders = ConnectionField(
         "saleor.graphql.order.types.OrderCountableConnection",
         description=(
-            "List of user's orders. Requires one of the following permissions: "
+            "List of user's orders. The query will not initiate any external requests, "
+            "including filtering available shipping methods, or performing external "
+            "tax calculations. Requires one of the following"
+            " permissions: "
             f"{AccountPermissions.MANAGE_STAFF.name}, "
             f"{AuthorizationFilters.OWNER.name}."
         ),
@@ -385,7 +421,7 @@ class User(ModelObjectType[models.User]):
         description=(
             "List of channels the user has access to. The sum of channels from all "
             "user groups. If at least one group has `restrictedAccessToChannels` "
-            "set to False - all channels are returned." + ADDED_IN_314 + PREVIEW_FEATURE
+            "set to False - all channels are returned."
         ),
     )
     restricted_access_to_channels = graphene.Boolean(
@@ -393,9 +429,7 @@ class User(ModelObjectType[models.User]):
         description=(
             "Determine if user have restricted access to channels. False if at least "
             "one user group has `restrictedAccessToChannels` set to False."
-        )
-        + ADDED_IN_314
-        + PREVIEW_FEATURE,
+        ),
     )
     avatar = ThumbnailField(description="The avatar of the user.")
     events = PermissionsField(
@@ -423,16 +457,16 @@ class User(ModelObjectType[models.User]):
         Address, description="The default billing address of the user."
     )
     external_reference = graphene.String(
-        description=f"External ID of this user. {ADDED_IN_310}", required=False
+        description="External ID of this user.", required=False
     )
 
-    last_login = graphene.DateTime(
+    last_login = DateTime(
         description="The date when the user last time log in to the system."
     )
-    date_joined = graphene.DateTime(
+    date_joined = DateTime(
         required=True, description="The data when the user create account."
     )
-    updated_at = graphene.DateTime(
+    updated_at = DateTime(
         required=True,
         description="The data when the user last update the account information.",
     )
@@ -442,7 +476,7 @@ class User(ModelObjectType[models.User]):
             "Returns a list of user's stored payment methods that can be used in "
             "provided channel. The field returns a list of stored payment methods by "
             "payment apps. When `amount` is not provided, 0 will be used as default "
-            "value." + ADDED_IN_315 + PREVIEW_FEATURE
+            "value."
         ),
         channel=graphene.String(
             description="Slug of a channel for which the data should be returned.",
@@ -463,9 +497,12 @@ class User(ModelObjectType[models.User]):
     @staticmethod
     def resolve_checkout(root: models.User, info: ResolveInfo):
         database_connection_name = get_database_connection_name(info.context)
-        return get_user_checkout(
+        checkout = get_user_checkout(
             root, database_connection_name=database_connection_name
         )
+        if not checkout:
+            return None
+        return SyncWebhookControlContext(node=checkout)
 
     @staticmethod
     @traced_resolver
@@ -516,8 +553,12 @@ class User(ModelObjectType[models.User]):
     @staticmethod
     def resolve_checkouts(root: models.User, info: ResolveInfo, **kwargs):
         def _resolve_checkouts(checkouts):
-            return create_connection_slice(
-                checkouts, info, kwargs, CheckoutCountableConnection
+            return create_connection_slice_for_sync_webhook_control_context(
+                checkouts,
+                info,
+                kwargs,
+                CheckoutCountableConnection,
+                allow_sync_webhooks=False,
             )
 
         if channel := kwargs.get("channel"):
@@ -610,8 +651,12 @@ class User(ModelObjectType[models.User]):
                     order for order in orders if order.channel_id in accessible_channels
                 ]
 
-            return create_connection_slice(
-                orders, info, kwargs, OrderCountableConnection
+            return create_connection_slice_for_sync_webhook_control_context(
+                orders,
+                info,
+                kwargs,
+                OrderCountableConnection,
+                allow_sync_webhooks=False,
             )
 
         to_fetch = [OrdersByUserLoader(info.context).load(root.id)]
@@ -626,11 +671,11 @@ class User(ModelObjectType[models.User]):
     def resolve_avatar(
         root: models.User,
         info: ResolveInfo,
-        size: Optional[int] = None,
-        format: Optional[str] = None,
-    ):
+        size: int | None = None,
+        format: str | None = None,
+    ) -> None | Image | Promise[Image]:
         if not root.avatar:
-            return
+            return None
 
         if size == 0:
             return Image(url=root.avatar.url, alt=None)
@@ -672,7 +717,7 @@ class User(ModelObjectType[models.User]):
         from .resolvers import resolve_users
 
         ids = set()
-        emails = set()
+        emails: set[str | None] = set()
         for root in roots:
             if root.id is not None:
                 ids.add(root.id)
@@ -927,16 +972,11 @@ class Group(ModelObjectType[models.Group]):
         ),
     )
     accessible_channels = NonNullList(
-        Channel,
-        description="List of channels the group has access to."
-        + ADDED_IN_314
-        + PREVIEW_FEATURE,
+        Channel, description="List of channels the group has access to."
     )
     restricted_access_to_channels = graphene.Boolean(
         required=True,
-        description="Determine if the group have restricted access to channels."
-        + ADDED_IN_314
-        + PREVIEW_FEATURE,
+        description="Determine if the group have restricted access to channels.",
     )
 
     class Meta:
@@ -948,7 +988,7 @@ class Group(ModelObjectType[models.Group]):
     @staticmethod
     def resolve_users(root: models.Group, info: ResolveInfo):
         database_connection_name = get_database_connection_name(info.context)
-        return root.user_set.using(database_connection_name).all()  # type: ignore[attr-defined]
+        return root.user_set.using(database_connection_name).all()
 
     @staticmethod
     def resolve_permissions(root: models.Group, info: ResolveInfo):

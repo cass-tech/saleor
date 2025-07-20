@@ -14,12 +14,13 @@ from ....order.utils import (
 from ....permission.enums import OrderPermissions
 from ...app.dataloaders import get_app_promise
 from ...core import ResolveInfo
+from ...core.context import SyncWebhookControlContext
 from ...core.mutations import ModelWithRestrictedChannelAccessMutation
 from ...core.types import OrderError
 from ...plugins.dataloaders import get_plugin_manager_promise
 from ..types import Order, OrderLine
 from .draft_order_create import OrderLineInput
-from .utils import EditableOrderValidationMixin, get_webhook_handler_by_order_status
+from .utils import EditableOrderValidationMixin, call_event_by_order_status
 
 
 class OrderLineUpdate(
@@ -73,10 +74,11 @@ class OrderLineUpdate(
     def save(cls, info: ResolveInfo, instance, cleaned_input):
         manager = get_plugin_manager_promise(info.context).get()
 
+        order_is_unconfirmed = instance.order.is_unconfirmed()
         line_allocation = instance.allocations.first()
         warehouse_pk = (
             line_allocation.stock.warehouse.pk
-            if line_allocation and instance.order.is_unconfirmed()
+            if line_allocation and order_is_unconfirmed
             else None
         )
         app = get_app_promise(info.context).get()
@@ -87,6 +89,7 @@ class OrderLineUpdate(
                 variant=instance.variant,
                 warehouse_pk=warehouse_pk,
             )
+            order = instance.order
             try:
                 change_order_line_quantity(
                     info.context.user,
@@ -94,26 +97,28 @@ class OrderLineUpdate(
                     line_info,
                     instance.old_quantity,
                     instance.quantity,
-                    instance.order.channel,
+                    order,
                     manager,
+                    allocate_stock=order_is_unconfirmed,
                 )
-            except InsufficientStock:
+            except InsufficientStock as e:
                 raise ValidationError(
                     "Cannot set new quantity because of insufficient stock.",
                     code=OrderErrorCode.INSUFFICIENT_STOCK.value,
-                )
-            invalidate_order_prices(instance.order)
-            recalculate_order_weight(instance.order)
-            instance.order.save(update_fields=["should_refresh_prices", "weight"])
+                ) from e
+            invalidate_order_prices(order)
+            recalculate_order_weight(order)
+            order.save(update_fields=["should_refresh_prices", "weight"])
 
-            func = get_webhook_handler_by_order_status(instance.order.status, manager)
-            cls.call_event(func, instance.order)
+            call_event_by_order_status(order, manager)
 
     @classmethod
     def success_response(cls, instance):
-        response = super().success_response(instance)
-        response.order = instance.order
-        return response
+        return cls(
+            orderLine=SyncWebhookControlContext(node=instance),
+            order=SyncWebhookControlContext(node=instance.order),
+            errors=[],
+        )
 
     @classmethod
     def get_instance_channel_id(cls, instance, **data):

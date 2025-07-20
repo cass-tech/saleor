@@ -1,11 +1,10 @@
 from collections.abc import Iterable
 from functools import partial
-from typing import Union
 from uuid import uuid4
 
 from django.conf import settings
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
-from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.indexes import BTreeIndex, GinIndex
 from django.db import models
 from django.db.models import JSONField, Q, Value
 from django.db.models.expressions import Exists, OuterRef
@@ -67,6 +66,7 @@ class Address(ModelWithMetadata):
     country = CountryField()
     country_area = models.CharField(max_length=128, blank=True)
     phone = PossiblePhoneNumberField(blank=True, default="", db_index=True)
+    validation_skipped = models.BooleanField(default=False)
 
     objects = AddressManager()
 
@@ -93,6 +93,10 @@ class Address(ModelWithMetadata):
                 ],
                 opclasses=["gin_trgm_ops"] * 6,
             ),
+            BTreeIndex(
+                fields=["country"],
+                name="address_country_idx",
+            ),
         ]
 
     def __eq__(self, other):
@@ -110,7 +114,7 @@ class Address(ModelWithMetadata):
         data = model_to_dict(self, exclude=["id", "user"])
         if isinstance(data["country"], Country):
             data["country"] = data["country"].code
-        if isinstance(data["phone"], PhoneNumber):
+        if isinstance(data["phone"], PhoneNumber) and not data["validation_skipped"]:
             data["phone"] = data["phone"].as_e164
         return data
 
@@ -143,7 +147,7 @@ class UserManager(BaseUserManager["User"]):
         group, created = Group.objects.get_or_create(name="Full Access")
         if created:
             group.permissions.add(*get_permissions())
-        group.user_set.add(user)  # type: ignore[attr-defined]
+        group.user_set.add(user)
         return user
 
     def customers(self):
@@ -190,7 +194,11 @@ class User(
     search_document = models.TextField(blank=True, default="")
     uuid = models.UUIDField(default=uuid4, unique=True)
 
+    # Denormalized number of orders placed by the user
+    number_of_orders = models.PositiveIntegerField(default=0, db_default=0)
+
     USERNAME_FIELD = "email"
+    RETURN_ID_IN_API_RESPONSE = True
 
     objects = UserManager()
 
@@ -221,6 +229,28 @@ class User(
                 name="user_p_meta_jsonb_path_idx",
                 fields=["private_metadata"],
                 opclasses=["jsonb_path_ops"],
+            ),
+            GinIndex(
+                fields=["first_name"],
+                name="first_name_gin",
+                opclasses=["gin_trgm_ops"],
+            ),
+            GinIndex(
+                fields=["last_name"],
+                name="last_name_gin",
+                opclasses=["gin_trgm_ops"],
+            ),
+            BTreeIndex(
+                fields=["date_joined"],
+                name="user_date_joined_idx",
+            ),
+            BTreeIndex(
+                fields=["email"],
+                name="user_email_idx",
+            ),
+            BTreeIndex(
+                fields=["number_of_orders"],
+                name="user_number_of_orders_idx",
             ),
         ]
 
@@ -289,7 +319,7 @@ class User(
     def get_short_name(self):
         return self.email
 
-    def has_perm(self, perm: Union[BasePermissionEnum, str], obj=None) -> bool:
+    def has_perm(self, perm: BasePermissionEnum | str, obj=None) -> bool:
         # This method is overridden to accept perm as BasePermissionEnum
         perm = perm.value if isinstance(perm, BasePermissionEnum) else perm
 
@@ -299,7 +329,7 @@ class User(
         return _user_has_perm(self, perm, obj)
 
     def has_perms(
-        self, perm_list: Iterable[Union[BasePermissionEnum, str]], obj=None
+        self, perm_list: Iterable[BasePermissionEnum | str], obj=None
     ) -> bool:
         # This method is overridden to accept perm as BasePermissionEnum
         perm_list = [

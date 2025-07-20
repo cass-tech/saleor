@@ -6,25 +6,21 @@ taxes (Money instead of TaxedMoney). If you don't need pre-taxed prices use func
 from calculations.py.
 """
 
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from prices import Money
 
 from ..core.prices import quantize_price
 from ..core.taxes import zero_money
-from ..discount import DiscountValueType, VoucherType
+from ..discount import VoucherType
 
 if TYPE_CHECKING:
-    from decimal import Decimal
-
     from ..channel.models import Channel
     from .fetch import CheckoutInfo, CheckoutLineInfo, ShippingMethodInfo
 
 
 def calculate_base_line_unit_price(
     line_info: "CheckoutLineInfo",
-    channel: "Channel",
 ) -> Money:
     """Calculate line unit price including discounts and vouchers.
 
@@ -32,9 +28,7 @@ def calculate_base_line_unit_price(
     voucher discounts.
     The price does not include the entire order discount.
     """
-    total_line_price = calculate_base_line_total_price(
-        line_info=line_info, channel=channel
-    )
+    total_line_price = calculate_base_line_total_price(line_info=line_info)
     quantity = line_info.line.quantity
     currency = total_line_price.currency
     return quantize_price(total_line_price / quantity, currency)
@@ -42,7 +36,6 @@ def calculate_base_line_unit_price(
 
 def calculate_base_line_total_price(
     line_info: "CheckoutLineInfo",
-    channel: "Channel",
     include_voucher: bool = True,
 ) -> Money:
     """Calculate line total price including discounts and vouchers.
@@ -52,13 +45,9 @@ def calculate_base_line_total_price(
     The price does not include order promotions and the entire order vouchers.
     When the line is gift reward, the price is zero.
     """
-    variant = line_info.variant
-    currency = line_info.channel_listing.currency
-    quantity = line_info.line.quantity
+    from ..discount.utils.voucher import calculate_line_discount_amount_from_voucher
 
-    variant_price = variant.get_base_price(
-        line_info.channel_listing, line_info.line.price_override
-    )
+    variant_price = line_info.undiscounted_unit_price
 
     total_price = variant_price * line_info.line.quantity
 
@@ -67,39 +56,10 @@ def calculate_base_line_total_price(
         total_price -= discount_amount
 
     if include_voucher and line_info.voucher:
-        if not line_info.voucher.apply_once_per_order:
-            if line_info.voucher.discount_value_type == DiscountValueType.PERCENTAGE:
-                voucher_discount_amount = line_info.voucher.get_discount_amount_for(
-                    total_price, channel=channel
-                )
-                total_price = max(
-                    total_price - voucher_discount_amount, zero_money(currency)
-                )
-            else:
-                unit_price = total_price / quantity
-                voucher_unit_discount_amount = (
-                    line_info.voucher.get_discount_amount_for(
-                        unit_price, channel=channel
-                    )
-                )
-                total_price = max(
-                    total_price - (voucher_unit_discount_amount * quantity),
-                    zero_money(currency),
-                )
-        else:
-            unit_price = total_price / quantity
-            voucher_unit_discount_amount = line_info.voucher.get_discount_amount_for(
-                unit_price, channel=channel
-            )
-            variant_price_with_discounts = max(
-                unit_price - voucher_unit_discount_amount, zero_money(currency)
-            )
-            # we add -1 as we handle a case when voucher is applied only to single line
-            # of the cheapest item
-            quantity_without_voucher = line_info.line.quantity - 1
-            total_price = (
-                unit_price * quantity_without_voucher + variant_price_with_discounts
-            )
+        discount_amount = calculate_line_discount_amount_from_voucher(
+            line_info, total_price
+        )
+        total_price -= discount_amount
 
     return quantize_price(total_price, total_price.currency)
 
@@ -121,16 +81,13 @@ def calculate_undiscounted_base_line_unit_price(
     channel: "Channel",
 ):
     """Calculate line unit price without discounts and vouchers."""
-    variant = line_info.variant
-    variant_price = variant.get_base_price(
-        line_info.channel_listing, line_info.line.price_override
-    )
+    variant_price = line_info.undiscounted_unit_price
     return quantize_price(variant_price, variant_price.currency)
 
 
 def base_checkout_delivery_price(
     checkout_info: "CheckoutInfo",
-    lines: Optional[Iterable["CheckoutLineInfo"]] = None,
+    lines: list["CheckoutLineInfo"] | None = None,
     include_voucher: bool = True,
 ) -> Money:
     """Calculate base (untaxed) price for any kind of delivery method."""
@@ -156,12 +113,12 @@ def base_checkout_delivery_price(
 
 def base_checkout_undiscounted_delivery_price(
     checkout_info: "CheckoutInfo",
-    lines: Optional[Iterable["CheckoutLineInfo"]] = None,
+    lines: list["CheckoutLineInfo"] | None = None,
 ) -> Money:
     """Calculate base (untaxed) undiscounted price for any kind of delivery method."""
     from .fetch import ShippingMethodInfo
 
-    delivery_method_info = checkout_info.delivery_method_info
+    delivery_method_info = checkout_info.get_delivery_method_info()
     currency = checkout_info.checkout.currency
 
     if not isinstance(delivery_method_info, ShippingMethodInfo):
@@ -175,7 +132,7 @@ def base_checkout_undiscounted_delivery_price(
 def calculate_base_price_for_shipping_method(
     checkout_info: "CheckoutInfo",
     shipping_method_info: "ShippingMethodInfo",
-    lines: Optional[Iterable["CheckoutLineInfo"]] = None,
+    lines: list["CheckoutLineInfo"] | None = None,
 ) -> Money:
     """Return checkout shipping price."""
     from .fetch import CheckoutLineInfo
@@ -200,7 +157,7 @@ def calculate_base_price_for_shipping_method(
 
 def base_checkout_total(
     checkout_info: "CheckoutInfo",
-    lines: Iterable["CheckoutLineInfo"],
+    lines: list["CheckoutLineInfo"],
 ) -> Money:
     """Return the total cost of the checkout.
 
@@ -216,7 +173,7 @@ def base_checkout_total(
 
 
 def base_checkout_subtotal(
-    checkout_lines: Iterable["CheckoutLineInfo"],
+    checkout_lines: list["CheckoutLineInfo"],
     channel: "Channel",
     currency: str,
     include_voucher: bool = True,
@@ -230,7 +187,6 @@ def base_checkout_subtotal(
     line_totals = [
         calculate_base_line_total_price(
             line,
-            channel,
             include_voucher=include_voucher,
         )
         for line in checkout_lines
@@ -241,12 +197,14 @@ def base_checkout_subtotal(
 
 def checkout_total(
     checkout_info: "CheckoutInfo",
-    lines: Iterable["CheckoutLineInfo"],
+    lines: list["CheckoutLineInfo"],
 ) -> Money:
     """Return the total cost of the checkout including discounts and vouchers.
 
     It should be used as a based value when no flat rate/tax plugin/tax app is active.
     """
+    from ..discount.utils.voucher import is_order_level_voucher
+
     currency = checkout_info.checkout.currency
     subtotal = base_checkout_subtotal(lines, checkout_info.channel, currency)
     shipping_price = base_checkout_delivery_price(checkout_info, lines)
@@ -255,10 +213,8 @@ def checkout_total(
     # order promotion discount and entire_order voucher discount with
     # apply_once_per_order set to False are not included in the total price yet
     discounted_object_promotion = bool(checkout_info.discounts)
-    discount_not_included = discounted_object_promotion or (
+    discount_not_included = discounted_object_promotion or is_order_level_voucher(
         checkout_info.voucher
-        and checkout_info.voucher.type == VoucherType.ENTIRE_ORDER
-        and not checkout_info.voucher.apply_once_per_order
     )
     # Discount is subtracted from both gross and net values, which may cause negative
     # net value if we are having a discount that covers whole price.
@@ -267,12 +223,11 @@ def checkout_total(
     return subtotal + shipping_price
 
 
-def apply_checkout_discount_on_checkout_line(
+def get_line_total_price_with_propagated_checkout_discount(
     checkout_info: "CheckoutInfo",
-    lines: Iterable["CheckoutLineInfo"],
+    lines: list["CheckoutLineInfo"],
     checkout_line_info: "CheckoutLineInfo",
-    line_total_price: Money,
-):
+) -> Money:
     """Calculate the checkout line price with discounts.
 
     Include the entire order voucher discount or discount from order
@@ -281,88 +236,91 @@ def apply_checkout_discount_on_checkout_line(
     the rate of total line price to checkout total price.
     """
     voucher = checkout_info.voucher
+    base_total_price = calculate_base_line_total_price(
+        checkout_line_info,
+    )
     if voucher and (
         voucher.apply_once_per_order
         or voucher.type in [VoucherType.SHIPPING, VoucherType.SPECIFIC_PRODUCT]
     ):
-        return line_total_price
+        return base_total_price
 
     if not voucher and not checkout_info.discounts:
-        return line_total_price
+        return base_total_price
 
-    total_discount_amount = checkout_info.checkout.discount_amount
-    return _get_discounted_checkout_line_price(
-        checkout_line_info,
-        lines,
-        line_total_price,
-        total_discount_amount,
-        checkout_info.channel,
-    )
+    total_discount = checkout_info.checkout.discount
+    for (
+        checkout_line,
+        total_price,
+    ) in _propagate_checkout_discount_on_checkout_lines_prices(
+        lines, total_discount, checkout_info.channel.currency_code
+    ):
+        if checkout_line_info.line.id == checkout_line.id:
+            return total_price
+    return base_total_price
 
 
-def _get_discounted_checkout_line_price(
-    checkout_line_info: "CheckoutLineInfo",
-    lines: Iterable["CheckoutLineInfo"],
-    line_total_price: Money,
-    total_discount_amount: "Decimal",
-    channel: "Channel",
+def _propagate_checkout_discount_on_checkout_lines_prices(
+    lines: list["CheckoutLineInfo"],
+    total_discount: Money,
+    currency: str,
 ):
     """Apply checkout discount on checkout line price.
 
     Propagate the discount amount proportionally to total prices of items.
     Ensure that the sum of discounts is equal to the discount amount.
     """
-    currency = channel.currency_code
-
     lines = list(lines)
+    lines_count = len(lines)
 
     # if the checkout has a single line, the whole discount amount will be applied
     # to this line
-    if len(lines) == 1:
-        return max(
-            (line_total_price - Money(total_discount_amount, currency)),
-            zero_money(currency),
+    if lines_count == 1:
+        line_info = lines[0]
+        line_total_price = calculate_base_line_total_price(line_info)
+        yield (
+            line_info.line,
+            max(
+                (line_total_price - total_discount),
+                zero_money(currency),
+            ),
         )
-
-    # if the checkout has more lines we need to propagate the discount amount
-    # proportionally to total prices of items
-    lines_total_prices = [
-        calculate_base_line_total_price(
-            line_info,
-            channel,
-        ).amount
-        for line_info in lines
-        if line_info.line.id != checkout_line_info.line.id
-    ]
-
-    total_price = sum(lines_total_prices) + line_total_price.amount
-
-    last_element = lines[-1].line.id == checkout_line_info.line.id
-    if last_element:
-        discount_amount = _calculate_discount_for_last_element(
-            lines_total_prices, total_price, total_discount_amount
-        )
-    else:
-        discount_amount = line_total_price.amount / total_price * total_discount_amount
-    return max(
-        (line_total_price - Money(discount_amount, currency)),
-        zero_money(currency),
-    )
-
-
-def _calculate_discount_for_last_element(
-    lines_total_prices, total_price, total_discount_amount
-):
-    """Calculate the discount for last element.
-
-    If the given line is last on the list we should calculate the discount by difference
-    between total discount amount and sum of discounts applied to rest of the lines,
-    otherwise the sum of discounts won't be equal to the discount amount.
-    """
-    sum_of_discounts_other_elements = sum(
-        [
-            line_total_price / total_price * total_discount_amount
-            for line_total_price in lines_total_prices
+    elif lines_count > 1:
+        # if the checkout has more lines we need to propagate the discount amount
+        # proportionally to total prices of items
+        lines_total_prices = [
+            calculate_base_line_total_price(
+                line_info,
+            )
+            for line_info in lines
         ]
-    )
-    return total_discount_amount - sum_of_discounts_other_elements
+
+        total_price = sum(lines_total_prices, start=Money(0, currency))
+        remaining_discount = total_discount
+        for idx, line_info in enumerate(lines):
+            line = line_info.line
+            if not total_price:
+                yield line, zero_money(currency)
+            elif idx < lines_count - 1:
+                line_total_price = lines_total_prices[idx]
+                share = line_total_price / total_price
+                discount = quantize_price(
+                    min(share * total_discount, line_total_price), currency
+                )
+                yield (
+                    line,
+                    max(
+                        (line_total_price - discount),
+                        zero_money(currency),
+                    ),
+                )
+                remaining_discount -= discount
+            else:
+                line_total_price = lines_total_prices[idx]
+                yield (
+                    line,
+                    max(
+                        (line_total_price - remaining_discount),
+                        zero_money(currency),
+                    ),
+                )

@@ -1,23 +1,21 @@
-from datetime import datetime
+import datetime
 
 import graphene
-import pytz
 from django.core.exceptions import ValidationError
 from django.db.models import Exists, OuterRef
 
 from .....core.tracing import traced_atomic_transaction
 from .....discount import models
 from .....discount.error_codes import DiscountErrorCode
-from .....discount.utils import CATALOGUE_FIELDS
+from .....discount.utils.promotion import CATALOGUE_FIELDS
 from .....permission.enums import DiscountPermissions
 from .....product import models as product_models
 from .....product.utils.product import mark_products_in_channels_as_dirty
 from .....webhook.event_types import WebhookEventAsyncType
-from ....channel import ChannelContext
 from ....core import ResolveInfo
-from ....core.descriptions import DEPRECATED_IN_3X_MUTATION
+from ....core.context import ChannelContext
 from ....core.doc_category import DOC_CATEGORY_DISCOUNTS
-from ....core.mutations import ModelMutation
+from ....core.mutations import DeprecatedModelMutation
 from ....core.types import DiscountError
 from ....core.utils import (
     WebhookEventInfo,
@@ -37,7 +35,7 @@ from ..utils import update_variants_for_promotion
 from .sale_create import SaleInput
 
 
-class SaleUpdate(ModelMutation):
+class SaleUpdate(DeprecatedModelMutation):
     class Arguments:
         id = graphene.ID(required=True, description="ID of a sale to update.")
         input = SaleInput(
@@ -45,11 +43,7 @@ class SaleUpdate(ModelMutation):
         )
 
     class Meta:
-        description = (
-            "Updates a sale."
-            + DEPRECATED_IN_3X_MUTATION
-            + " Use `promotionUpdate` mutation instead."
-        )
+        description = "Updates a sale."
         model = models.Promotion
         object_type = Sale
         return_field_name = "sale"
@@ -126,9 +120,9 @@ class SaleUpdate(ModelMutation):
         end_date = input.get("end_date") or instance.end_date
         try:
             validate_end_is_after_start(start_date, end_date)
-        except ValidationError as error:
-            error.code = DiscountErrorCode.INVALID.value
-            raise ValidationError({"end_date": error})
+        except ValidationError as e:
+            e.code = DiscountErrorCode.INVALID.value
+            raise ValidationError({"end_date": e}) from e
 
     @classmethod
     def update_fields(
@@ -147,7 +141,7 @@ class SaleUpdate(ModelMutation):
             for rule in rules:
                 rule.reward_value_type = type
 
-        if any([key in CATALOGUE_FIELDS for key in input.keys()]):
+        if any(key in CATALOGUE_FIELDS for key in input.keys()):
             predicate = cls.create_predicate(input)
             for rule in rules:
                 rule.catalogue_predicate = predicate
@@ -201,7 +195,7 @@ class SaleUpdate(ModelMutation):
                 product_ids_to_update = product_ids | previous_product_ids
                 cls.call_event(
                     mark_products_in_channels_as_dirty,
-                    {channel_id: product_ids_to_update for channel_id in channel_ids},
+                    dict.fromkeys(channel_ids, product_ids_to_update),
                 )
 
     @classmethod
@@ -235,7 +229,7 @@ class SaleUpdate(ModelMutation):
         and the notification_date is not set or the last notification was sent
         before start or end date.
         """
-        now = datetime.now(pytz.utc)
+        now = datetime.datetime.now(tz=datetime.UTC)
 
         notification_date = instance.last_notification_scheduled_at
         start_date = input.get("start_date")

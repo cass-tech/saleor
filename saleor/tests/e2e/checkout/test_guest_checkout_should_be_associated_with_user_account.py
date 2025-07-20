@@ -1,8 +1,8 @@
 import pytest
 
+from ..account.utils import create_customer, get_user
 from ..product.utils.preparing_product import prepare_product
 from ..shop.utils.preparing_shop import prepare_default_shop
-from ..users.utils import create_customer, get_user
 from ..utils import assign_permissions
 from .utils import (
     checkout_complete,
@@ -15,14 +15,17 @@ from .utils import (
 def create_active_customer(
     e2e_staff_api_client,
 ):
-    email = "user@saleor.io"
+    customer_input = {
+        "email": "user@saleor.io",
+        "isActive": True,
+    }
 
     user_data = create_customer(
         e2e_staff_api_client,
-        email,
-        is_active=True,
+        customer_input,
     )
     user_id = user_data["id"]
+    email = user_data["email"]
 
     return user_id, email
 
@@ -80,8 +83,6 @@ def test_guest_checkout_should_be_associated_with_user_account_CORE_1517(
         lines,
         channel_slug,
         email,
-        set_default_billing_address=True,
-        set_default_shipping_address=True,
     )
     checkout_id = checkout_data["id"]
 

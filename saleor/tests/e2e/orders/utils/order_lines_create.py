@@ -11,16 +11,20 @@ mutation orderLinesCreate($id: ID!, $input: [OrderLineCreateInput!]!) {
           amount
         }
       }
+      undiscountedShippingPrice {
+        amount
+      }
+      shippingPrice {
+        ...BaseTaxedMoney
+      }
       total {
-        gross {
-          amount
-        }
-        net {
-          amount
-        }
-        tax {
-          amount
-        }
+        ...BaseTaxedMoney
+      }
+      subtotal {
+        ...BaseTaxedMoney
+      }
+      undiscountedTotal {
+        ...BaseTaxedMoney
       }
       isShippingRequired
       lines {
@@ -30,26 +34,38 @@ mutation orderLinesCreate($id: ID!, $input: [OrderLineCreateInput!]!) {
           id
         }
         totalPrice {
-          gross {
-            amount
-          }
-          net {
-            amount
-          }
-          tax {
-            amount
-          }
+          ...BaseTaxedMoney
         }
         unitPrice {
+          ...BaseTaxedMoney
+        }
+        unitDiscountReason
+        unitDiscountType
+        unitDiscountValue
+        unitDiscount {
+          amount
+        }
+        undiscountedUnitPrice {
+          ...BaseTaxedMoney
+        }
+        undiscountedTotalPrice {
+          ...BaseTaxedMoney
+        }
+        undiscountedTotalPrice {
           gross {
             amount
           }
         }
-        unitDiscountReason
-        undiscountedUnitPrice {
-          gross {
-            amount
-          }
+      }
+      discounts {
+        id
+        type
+        name
+        valueType
+        value
+        reason
+        amount {
+          amount
         }
       }
     }
@@ -59,6 +75,19 @@ mutation orderLinesCreate($id: ID!, $input: [OrderLineCreateInput!]!) {
       message
     }
   }
+}
+
+fragment BaseTaxedMoney on TaxedMoney {
+  gross {
+    amount
+  }
+  net {
+    amount
+  }
+  tax {
+    amount
+  }
+  currency
 }
 """
 

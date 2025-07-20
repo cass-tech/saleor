@@ -2,11 +2,10 @@ import logging
 import uuid
 from decimal import Decimal
 
-import opentracing
-import opentracing.tags
 import razorpay
 import razorpay.errors
 
+from ....core.telemetry import saleor_attributes, tracer
 from ... import TransactionKind
 from ...interface import GatewayConfig, GatewayResponse, PaymentData
 from . import errors
@@ -33,7 +32,7 @@ def _generate_response(
 ) -> GatewayResponse:
     """Generate Saleor transaction information from the payload or from passed data."""
     return GatewayResponse(
-        transaction_id=data.get("id", payment_information.token),
+        transaction_id=data.get("id", payment_information.token),  # type: ignore[arg-type]
         action_required=False,
         kind=kind,
         amount=data.get("amount", payment_information.amount),
@@ -44,13 +43,14 @@ def _generate_response(
     )
 
 
-def check_payment_supported(payment_information: PaymentData):
+def check_payment_supported(payment_information: PaymentData) -> str | None:
     """Check that a given payment is supported."""
     if payment_information.currency not in SUPPORTED_CURRENCIES:
         return errors.UNSUPPORTED_CURRENCY % {"currency": payment_information.currency}
+    return None
 
 
-def get_error_message_from_razorpay_error(exc: BaseException):
+def get_error_message_from_razorpay_error(exc: BaseException) -> str:
     """Convert a Razorpay error to a user-friendly error message.
 
     It also logs the exception to stderr.
@@ -58,8 +58,7 @@ def get_error_message_from_razorpay_error(exc: BaseException):
     logger.exception(exc)
     if isinstance(exc, razorpay.errors.BadRequestError):
         return errors.INVALID_REQUEST
-    else:
-        return errors.SERVER_ERROR
+    return errors.SERVER_ERROR
 
 
 def clean_razorpay_response(response: dict):
@@ -97,12 +96,8 @@ def capture(payment_information: PaymentData, config: GatewayConfig) -> GatewayR
 
     if not error:
         try:
-            with opentracing.global_tracer().start_active_span(
-                "razorpay.payment.capture"
-            ) as scope:
-                span = scope.span
-                span.set_tag(opentracing.tags.COMPONENT, "payment")
-                span.set_tag("service.name", "razorpay")
+            with tracer.start_as_current_span("razorpay.payment.capture") as span:
+                span.set_attribute(saleor_attributes.COMPONENT, "payment")
                 response = razorpay_client.payment.capture(
                     payment_information.token, razorpay_amount
                 )
@@ -143,12 +138,8 @@ def refund(payment_information: PaymentData, config: GatewayConfig) -> GatewayRe
         razorpay_client = get_client(**config.connection_params)
         razorpay_amount = get_amount_for_razorpay(payment_information.amount)
         try:
-            with opentracing.global_tracer().start_active_span(
-                "razorpay.payment.refund"
-            ) as scope:
-                span = scope.span
-                span.set_tag(opentracing.tags.COMPONENT, "payment")
-                span.set_tag("service.name", "razorpay")
+            with tracer.start_as_current_span("razorpay.payment.refund") as span:
+                span.set_attribute(saleor_attributes.COMPONENT, "payment")
                 response = razorpay_client.payment.refund(
                     payment_information.token, razorpay_amount
                 )

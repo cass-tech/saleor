@@ -1,36 +1,111 @@
 from decimal import Decimal
+from unittest import mock
 
 import pytest
 from prices import Money, TaxedMoney
 
+from ...checkout import calculations
 from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ...checkout.utils import add_variant_to_checkout
 from ...core.prices import quantize_price
 from ...core.taxes import zero_taxed_money
-from ...discount.utils import create_checkout_discount_objects_for_order_promotions
+from ...discount.utils.checkout import (
+    create_checkout_discount_objects_for_order_promotions,
+)
 from ...plugins.manager import get_plugins_manager
+from ...product.models import ProductVariantChannelListing
 from ...tax.models import TaxClassCountryRate
 from .. import TaxCalculationStrategy
 from ..calculations.checkout import (
-    calculate_checkout_line_total,
-    calculate_checkout_shipping,
+    _calculate_checkout_line_total,
+    _calculate_checkout_shipping,
     update_checkout_prices_with_flat_rates,
 )
 
 
-def _enable_flat_rates(checkout, prices_entered_with_tax):
+def _enable_flat_rates(
+    checkout, prices_entered_with_tax, use_weighted_tax_for_shipping=False
+):
     tc = checkout.channel.tax_configuration
     tc.country_exceptions.all().delete()
     tc.prices_entered_with_tax = prices_entered_with_tax
     tc.tax_calculation_strategy = TaxCalculationStrategy.FLAT_RATES
+    tc.use_weighted_tax_for_shipping = use_weighted_tax_for_shipping
     tc.save()
 
 
 @pytest.mark.parametrize(
-    ("expected_net", "expected_gross", "voucher_amount", "prices_entered_with_tax"),
+    (
+        "checkout_total_net",
+        "checkout_total_gross",
+        "gift_card_balance",
+        "expected_total_net",
+        "expected_total_gross",
+    ),
     [
-        ("40.00", "49.20", "0.0", False),
-        ("30.08", "37.00", "3.0", True),
+        ("0.00", "0.00", "0.00", "0.00", "0.00"),
+        ("0.00", "0.00", "10.00", "0.00", "0.00"),
+        ("10.00", "10.00", "5.00", "5.00", "5.00"),  # tax rate = 0%
+        ("10.00", "10.00", "10.00", "0.00", "0.00"),  # tax rate = 0%
+        ("10.00", "12.00", "10.00", "1.67", "2.00"),  # tax rate = 20%
+        ("10.00", "12.00", "12.00", "0.00", "0.00"),  # tax rate = 20%
+        ("30.00", "36.00", "12.00", "20", "24.00"),  # tax rate = 20%
+    ],
+)
+@mock.patch("saleor.checkout.calculations.checkout_total")
+def test_calculate_checkout_total_with_gift_cards(
+    checkout_total_mock,
+    checkout_total_net,
+    checkout_total_gross,
+    gift_card_balance,
+    expected_total_net,
+    expected_total_gross,
+    gift_card,
+    checkout_with_gift_card,
+    address,
+):
+    assert not gift_card.last_used_on
+    gift_card.current_balance_amount = Decimal(gift_card_balance)
+    gift_card.save(update_fields=["current_balance_amount"])
+
+    checkout = checkout_with_gift_card
+    checkout.metadata_storage.store_value_in_metadata(items={"accepted": "true"})
+    checkout.metadata_storage.store_value_in_private_metadata(
+        items={"accepted": "false"}
+    )
+    checkout.save()
+    checkout.metadata_storage.save()
+
+    manager = get_plugins_manager(allow_replica=False)
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+
+    checkout_total_mock.return_value = TaxedMoney(
+        net=Money(checkout_total_net, "USD"), gross=Money(checkout_total_gross, "USD")
+    )
+
+    total = calculations.calculate_checkout_total_with_gift_cards(
+        manager, checkout_info, lines, address
+    )
+
+    assert total.net == Money(expected_total_net, "USD")
+    assert total.gross == Money(expected_total_gross, "USD")
+
+
+@pytest.mark.parametrize(
+    (
+        "expected_net",
+        "expected_gross",
+        "expected_tax_rate",
+        "voucher_amount",
+        "prices_entered_with_tax",
+        "use_weighted_tax_for_shipping",
+    ),
+    [
+        ("40.00", "49.20", "0.230", "0.0", False, False),
+        ("30.08", "37.00", "0.230", "3.0", True, False),
+        ("40.00", "49.20", "0.230", "0.0", False, True),
+        ("30.08", "37.00", "0.230", "3.0", True, True),
     ],
 )
 def test_calculate_checkout_total(
@@ -40,12 +115,14 @@ def test_calculate_checkout_total(
     voucher,
     expected_net,
     expected_gross,
+    expected_tax_rate,
     voucher_amount,
     prices_entered_with_tax,
+    use_weighted_tax_for_shipping,
 ):
     # given
     checkout = checkout_with_item
-    _enable_flat_rates(checkout, prices_entered_with_tax)
+    _enable_flat_rates(checkout, prices_entered_with_tax, use_weighted_tax_for_shipping)
 
     checkout.shipping_address = address
     voucher_amount = Money(voucher_amount, "USD")
@@ -68,7 +145,194 @@ def test_calculate_checkout_total(
     )
 
     # then
+    for line_info in lines:
+        assert line_info.line.tax_rate == Decimal(expected_tax_rate)
+    assert checkout.shipping_tax_rate == Decimal(expected_tax_rate)
     assert checkout.total == TaxedMoney(
+        net=Money(expected_net, "USD"), gross=Money(expected_gross, "USD")
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "expected_net",
+        "expected_gross",
+        "prices_entered_with_tax",
+        "use_weighted_tax_for_shipping",
+    ),
+    [
+        ("80.00", "92.40", False, False),
+        ("69.78", "80.00", True, False),
+        ("80.00", "91.54", False, True),
+        ("70.46", "80.00", True, True),
+    ],
+)
+def test_calculate_checkout_total_with_multiple_tax_rates(
+    checkout_with_items,
+    address,
+    shipping_zone,
+    tax_classes,
+    expected_net,
+    expected_gross,
+    prices_entered_with_tax,
+    use_weighted_tax_for_shipping,
+):
+    # given
+    checkout = checkout_with_items
+    _enable_flat_rates(checkout, prices_entered_with_tax, use_weighted_tax_for_shipping)
+
+    checkout.shipping_address = address
+    checkout.shipping_method = shipping_zone.shipping_methods.get()
+    checkout.save()
+
+    first_line = checkout.lines.first()
+    second_line = checkout.lines.last()
+    first_line.variant.product.tax_class.country_rates.update_or_create(
+        country=address.country, rate=23
+    )
+    assert first_line.variant.product_id != second_line.variant.product_id
+
+    second_tax_class = tax_classes[0]
+    second_tax_class.country_rates.filter(country=address.country).update(rate=3)
+    second_line.variant.product.tax_class = second_tax_class
+    second_line.variant.product.save()
+
+    lines, _ = fetch_checkout_lines(checkout)
+    manager = get_plugins_manager(allow_replica=False)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+
+    # when
+    update_checkout_prices_with_flat_rates(
+        checkout, checkout_info, lines, prices_entered_with_tax, address
+    )
+
+    # then
+    assert checkout.total == TaxedMoney(
+        net=Money(expected_net, "USD"), gross=Money(expected_gross, "USD")
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "expected_net",
+        "expected_gross",
+        "prices_entered_with_tax",
+    ),
+    [
+        ("10.00", "12.30", False),
+        ("8.13", "10.00", True),
+    ],
+)
+def test_calculate_checkout_shipping_with_not_weighted_taxes(
+    checkout_with_items,
+    address,
+    shipping_zone,
+    tax_classes,
+    expected_net,
+    expected_gross,
+    prices_entered_with_tax,
+):
+    # given
+    checkout = checkout_with_items
+    _enable_flat_rates(
+        checkout, prices_entered_with_tax, use_weighted_tax_for_shipping=False
+    )
+
+    checkout.shipping_address = address
+    checkout.shipping_method = shipping_zone.shipping_methods.get()
+    checkout.save()
+
+    first_line = checkout.lines.first()
+    second_line = checkout.lines.last()
+    first_line.variant.product.tax_class.country_rates.update_or_create(
+        country=address.country, rate=23
+    )
+    assert first_line.variant.product_id != second_line.variant.product_id
+
+    second_tax_class = tax_classes[0]
+    second_tax_class.country_rates.filter(country=address.country).update(rate=3)
+    second_line.variant.product.tax_class = second_tax_class
+    second_line.variant.product.save()
+
+    lines, _ = fetch_checkout_lines(checkout)
+    manager = get_plugins_manager(allow_replica=False)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+
+    # when
+    update_checkout_prices_with_flat_rates(
+        checkout, checkout_info, lines, prices_entered_with_tax, address
+    )
+
+    # then
+    assert checkout.shipping_tax_rate == Decimal("0.2300")
+    assert checkout.shipping_price == TaxedMoney(
+        net=Money(expected_net, "USD"), gross=Money(expected_gross, "USD")
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "expected_net",
+        "expected_gross",
+        "prices_entered_with_tax",
+    ),
+    [
+        ("10.00", "11.44", False),
+        ("8.81", "10.00", True),
+    ],
+)
+def test_calculate_checkout_shipping_with_weighted_taxes(
+    checkout_with_items,
+    address,
+    shipping_zone,
+    tax_classes,
+    expected_net,
+    expected_gross,
+    prices_entered_with_tax,
+):
+    # given
+    checkout = checkout_with_items
+    _enable_flat_rates(
+        checkout, prices_entered_with_tax, use_weighted_tax_for_shipping=True
+    )
+
+    checkout.shipping_address = address
+    checkout.shipping_method = shipping_zone.shipping_methods.get()
+    checkout.save()
+
+    first_line = checkout.lines.first()
+    second_line = checkout.lines.last()
+    first_line.variant.product.tax_class.country_rates.update_or_create(
+        country=address.country, rate=23
+    )
+    assert first_line.variant.product_id != second_line.variant.product_id
+
+    second_tax_class = tax_classes[0]
+    second_tax_class.country_rates.filter(country=address.country).update(rate=3)
+    second_line.variant.product.tax_class = second_tax_class
+    second_line.variant.product.save()
+
+    lines, _ = fetch_checkout_lines(checkout)
+    manager = get_plugins_manager(allow_replica=False)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+
+    # when
+    update_checkout_prices_with_flat_rates(
+        checkout, checkout_info, lines, prices_entered_with_tax, address
+    )
+
+    # then
+    weighted_tax_amount = sum(
+        line_info.line.total_price.net.amount * line_info.line.tax_rate
+        for line_info in lines
+    )
+    weighted_tax_amount = weighted_tax_amount / sum(
+        line_info.line.total_price.net.amount for line_info in lines
+    )
+    assert checkout.shipping_tax_rate.quantize(Decimal("0.0001")) == Decimal(
+        weighted_tax_amount
+    ).quantize(Decimal("0.0001"))
+    assert checkout.shipping_price == TaxedMoney(
         net=Money(expected_net, "USD"), gross=Money(expected_gross, "USD")
     )
 
@@ -539,7 +803,7 @@ def test_calculate_checkout_line_total(checkout_with_item, shipping_zone, addres
     checkout_info = fetch_checkout_info(checkout, lines, manager)
     checkout_line_info = lines[0]
 
-    line_price = calculate_checkout_line_total(
+    line_price = _calculate_checkout_line_total(
         checkout_info, lines, checkout_line_info, rate, prices_entered_with_tax
     )
 
@@ -585,7 +849,7 @@ def test_calculate_checkout_line_total_voucher_on_entire_order(
     checkout_line_info = lines[0]
 
     # when
-    line_price = calculate_checkout_line_total(
+    line_price = _calculate_checkout_line_total(
         checkout_info, lines, checkout_line_info, rate, prices_entered_with_tax
     )
 
@@ -633,7 +897,7 @@ def test_calculate_checkout_line_total_with_voucher_one_line(
     checkout_line_info = lines[0]
 
     # when
-    line_price = calculate_checkout_line_total(
+    line_price = _calculate_checkout_line_total(
         checkout_info,
         lines,
         checkout_line_info,
@@ -675,7 +939,7 @@ def test_calculate_checkout_line_total_with_voucher_multiple_lines(
     checkout.shipping_address = address
     checkout.shipping_method_name = method.name
     checkout.shipping_method = method
-    discount_amount = Decimal("5")
+    discount_amount = Decimal(5)
     checkout.discount_amount = discount_amount
     checkout.voucher_code = voucher.code
     checkout.save()
@@ -700,7 +964,7 @@ def test_calculate_checkout_line_total_with_voucher_multiple_lines(
     checkout_line_info = lines[0]
 
     # when
-    line_total_price = calculate_checkout_line_total(
+    line_total_price = _calculate_checkout_line_total(
         checkout_info,
         lines,
         checkout_line_info,
@@ -747,7 +1011,7 @@ def test_calculate_checkout_line_total_with_voucher_multiple_lines_last_line(
     checkout.shipping_address = address
     checkout.shipping_method_name = method.name
     checkout.shipping_method = method
-    discount_amount = Decimal("5")
+    discount_amount = Decimal(5)
     checkout.discount_amount = discount_amount
     checkout.voucher_code = voucher.code
     checkout.save()
@@ -777,7 +1041,7 @@ def test_calculate_checkout_line_total_with_voucher_multiple_lines_last_line(
     checkout_line_info = lines[-1]
 
     # when
-    line_total_price = calculate_checkout_line_total(
+    line_total_price = _calculate_checkout_line_total(
         checkout_info,
         lines,
         checkout_line_info,
@@ -797,6 +1061,106 @@ def test_calculate_checkout_line_total_with_voucher_multiple_lines_last_line(
         net=quantize_price(expected_total_line_price / Decimal("1.23"), currency),
         gross=quantize_price(expected_total_line_price, currency),
     )
+
+
+def test_calculate_checkout_line_total_with_voucher_for_multiple_lines(
+    checkout, shipping_zone, address, voucher, product_list
+):
+    # given
+    manager = get_plugins_manager(allow_replica=False)
+
+    rate = Decimal(23)
+    prices_entered_with_tax = True
+    _enable_flat_rates(checkout, prices_entered_with_tax)
+
+    currency = checkout.currency
+
+    # prepare the checkout with line prices and discount value that might
+    # result in rounding issues
+    checkout_info = fetch_checkout_info(checkout, [], manager)
+    variant_1 = product_list[0].variants.last()
+    variant_2 = product_list[1].variants.last()
+    variant_3 = product_list[2].variants.last()
+
+    variant_ids = [variant_1.id, variant_2.id, variant_3.id]
+    channel_listings = list(
+        ProductVariantChannelListing.objects.filter(
+            variant_id__in=variant_ids, channel_id=checkout.channel_id
+        )
+    )
+
+    line_prices = [7, 33, 25]
+    for listing in channel_listings:
+        price = line_prices[variant_ids.index(listing.variant_id)]
+        listing.price_amount = price
+        listing.discounted_price_amount = price
+
+    ProductVariantChannelListing.objects.bulk_update(
+        channel_listings, ["price_amount", "discounted_price_amount"]
+    )
+
+    qty = 1
+    add_variant_to_checkout(checkout_info, variant_1, qty)
+    add_variant_to_checkout(checkout_info, variant_2, qty)
+    add_variant_to_checkout(checkout_info, variant_3, qty)
+
+    method = shipping_zone.shipping_methods.get()
+    checkout.shipping_address = address
+    checkout.shipping_method_name = method.name
+    checkout.shipping_method = method
+    discount_amount = Decimal(3)
+    checkout.discount_amount = discount_amount
+    checkout.voucher_code = voucher.code
+    checkout.save()
+
+    line = checkout.lines.last()
+    variant = line.variant
+    product = variant.product
+    product.tax_class.country_rates.update_or_create(country=address.country, rate=rate)
+
+    total_price = Money(sum(line_prices), currency)
+
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+
+    # when
+    result_total_prices = []
+    for line_info in lines:
+        result_total_prices.append(
+            _calculate_checkout_line_total(
+                checkout_info,
+                lines,
+                line_info,
+                rate,
+                prices_entered_with_tax,
+            )
+        )
+
+    # then
+    remaining_discount = discount_amount
+    assert (
+        sum(line_prices)
+        - sum([total_price.gross.amount for total_price in result_total_prices])
+        == discount_amount
+    )
+    for idx, line_total_price in enumerate(result_total_prices):
+        base_price = line_prices[idx]
+        line_base_total = Money(base_price, currency)
+        if idx < len(lines) - 1:
+            line_discount_amount = quantize_price(
+                discount_amount * line_base_total / total_price, currency
+            )
+            remaining_discount -= line_discount_amount
+        else:
+            line_discount_amount = remaining_discount
+
+        expected_total_line_price = line_base_total - Money(
+            line_discount_amount, currency
+        )
+        assert line_total_price == TaxedMoney(
+            net=quantize_price(expected_total_line_price / Decimal("1.23"), currency),
+            gross=quantize_price(expected_total_line_price, currency),
+        )
 
 
 def test_calculate_checkout_line_total_with_shipping_voucher(
@@ -819,7 +1183,7 @@ def test_calculate_checkout_line_total_with_shipping_voucher(
     checkout.shipping_address = address
     checkout.shipping_method_name = method.name
     checkout.shipping_method = method
-    checkout.discount_amount = Decimal("5")
+    checkout.discount_amount = Decimal(5)
     checkout.voucher_code = voucher_shipping_type.code
     checkout.save()
 
@@ -837,7 +1201,7 @@ def test_calculate_checkout_line_total_with_shipping_voucher(
     checkout_line_info = lines[0]
 
     # when
-    line_total_price = calculate_checkout_line_total(
+    line_total_price = _calculate_checkout_line_total(
         checkout_info,
         lines,
         checkout_line_info,
@@ -883,7 +1247,7 @@ def test_calculate_checkout_line_total_discount_from_order_promotion(
     create_checkout_discount_objects_for_order_promotions(checkout_info, lines)
 
     # when
-    line_price = calculate_checkout_line_total(
+    line_price = _calculate_checkout_line_total(
         checkout_info, lines, checkout_line_info, rate, prices_entered_with_tax
     )
 
@@ -931,7 +1295,7 @@ def test_calculate_checkout_line_total_discount_for_gift_line(
     create_checkout_discount_objects_for_order_promotions(checkout_info, lines)
 
     # when
-    line_price = calculate_checkout_line_total(
+    line_price = _calculate_checkout_line_total(
         checkout_info, lines, checkout_line_info, rate, prices_entered_with_tax
     )
 
@@ -961,7 +1325,7 @@ def test_calculate_checkout_shipping(
     checkout_info = fetch_checkout_info(checkout, lines, manager)
 
     # when
-    shipping_price = calculate_checkout_shipping(
+    shipping_price = _calculate_checkout_shipping(
         checkout_info, lines, rate, prices_entered_with_tax
     )
 
@@ -992,7 +1356,7 @@ def test_calculate_checkout_shipping_no_shipping_price(
     checkout_info = fetch_checkout_info(checkout, lines, manager)
 
     # when
-    shipping_price = calculate_checkout_shipping(
+    shipping_price = _calculate_checkout_shipping(
         checkout_info, lines, rate, prices_entered_with_tax
     )
 
@@ -1033,7 +1397,7 @@ def test_calculate_checkout_shipping_voucher_on_shipping(
     price = shipping_channel_listings.price
 
     # when
-    shipping_price = calculate_checkout_shipping(
+    shipping_price = _calculate_checkout_shipping(
         checkout_info, lines, rate, prices_entered_with_tax
     )
 
@@ -1076,7 +1440,7 @@ def test_calculate_checkout_shipping_free_shipping_voucher(
     checkout_info = fetch_checkout_info(checkout, lines, manager)
 
     # when
-    shipping_price = calculate_checkout_shipping(
+    shipping_price = _calculate_checkout_shipping(
         checkout_info, lines, rate, prices_entered_with_tax
     )
 
@@ -1114,7 +1478,7 @@ def test_calculate_checkout_shipping_free_entire_order_voucher(
     checkout_info = fetch_checkout_info(checkout, lines, manager)
 
     # when
-    shipping_price = calculate_checkout_shipping(
+    shipping_price = _calculate_checkout_shipping(
         checkout_info, lines, rate, prices_entered_with_tax
     )
 

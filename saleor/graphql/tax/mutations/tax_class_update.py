@@ -5,9 +5,8 @@ from ....permission.enums import CheckoutPermissions
 from ....tax import error_codes, models
 from ...account.enums import CountryCodeEnum
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_39
 from ...core.doc_category import DOC_CATEGORY_TAXES
-from ...core.mutations import ModelMutation
+from ...core.mutations import DeprecatedModelMutation
 from ...core.types import BaseInputObjectType, Error, NonNullList
 from ...core.utils import get_duplicates_items
 from ..types import TaxClass
@@ -64,7 +63,7 @@ class TaxClassUpdateInput(BaseInputObjectType):
         doc_category = DOC_CATEGORY_TAXES
 
 
-class TaxClassUpdate(ModelMutation):
+class TaxClassUpdate(DeprecatedModelMutation):
     class Arguments:
         id = graphene.ID(description="ID of the tax class.", required=True)
         input = TaxClassUpdateInput(
@@ -72,7 +71,7 @@ class TaxClassUpdate(ModelMutation):
         )
 
     class Meta:
-        description = "Update a tax class." + ADDED_IN_39
+        description = "Update a tax class."
         error_type_class = TaxClassUpdateError
         model = models.TaxClass
         object_type = TaxClass

@@ -1,12 +1,12 @@
 import logging
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Union
 
 from django.conf import settings
 from promise.promise import Promise
 
-from ...core.notify_events import AdminNotifyEvent, NotifyEventType
+from ...core.notify import AdminNotifyEvent, NotifyEventType
 from ...graphql.plugins.dataloaders import EmailTemplatesByPluginConfigurationLoader
 from ..base_plugin import BasePlugin, ConfigurationTypeField, PluginConfigurationType
 from ..email_common import (
@@ -15,6 +15,7 @@ from ..email_common import (
     DEFAULT_EMAIL_VALUE,
     DEFAULT_SUBJECT_HELP_TEXT,
     DEFAULT_TEMPLATE_HELP_TEXT,
+    REQUIRED_EMAIL_CONFIG_FIELDS,
     EmailConfig,
     validate_default_email_configuration,
     validate_format_of_provided_templates,
@@ -167,23 +168,44 @@ class AdminEmailPlugin(BasePlugin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        configuration = {item["name"]: item["value"] for item in self.configuration}
+        configuration = self._parse_email_config_or_get_default(self.configuration)
         self.config = EmailConfig(
-            host=configuration["host"] or settings.EMAIL_HOST,
-            port=configuration["port"] or str(settings.EMAIL_PORT),
-            username=configuration["username"] or settings.EMAIL_HOST_USER,
-            password=configuration["password"] or settings.EMAIL_HOST_PASSWORD,
+            host=configuration["host"],
+            port=configuration["port"],
+            username=configuration["username"],
+            password=configuration["password"],
             sender_name=configuration["sender_name"],
-            sender_address=(
-                configuration["sender_address"] or settings.DEFAULT_FROM_EMAIL
-            ),
-            use_tls=configuration["use_tls"] or settings.EMAIL_USE_TLS,
-            use_ssl=configuration["use_ssl"] or settings.EMAIL_USE_SSL,
+            sender_address=configuration["sender_address"],
+            use_tls=configuration["use_tls"],
+            use_ssl=configuration["use_ssl"],
         )
+
+    @classmethod
+    def _parse_email_config_or_get_default(
+        cls, configuration: PluginConfigurationType
+    ) -> dict:
+        configuration = {item["name"]: item["value"] for item in configuration}
+
+        configuration["username"] = configuration["username"] or ""
+        configuration["password"] = configuration["password"] or ""
+
+        set_any_required_field = any(
+            configuration.get(field) for field in REQUIRED_EMAIL_CONFIG_FIELDS
+        )
+        if not set_any_required_field:  # Use default email config
+            configuration["host"] = settings.EMAIL_HOST
+            configuration["port"] = str(settings.EMAIL_PORT)
+            configuration["username"] = settings.EMAIL_HOST_USER
+            configuration["password"] = settings.EMAIL_HOST_PASSWORD
+            configuration["sender_address"] = settings.DEFAULT_FROM_EMAIL
+            configuration["use_tls"] = settings.EMAIL_USE_TLS
+            configuration["use_ssl"] = settings.EMAIL_USE_SSL
+
+        return configuration
 
     def resolve_plugin_configuration(
         self, request
-    ) -> Union[PluginConfigurationType, Promise[PluginConfigurationType]]:
+    ) -> PluginConfigurationType | Promise[PluginConfigurationType]:
         # Get email templates from the database and merge them with self.configuration.
         if not self.db_config:
             return self.configuration
@@ -214,7 +236,12 @@ class AdminEmailPlugin(BasePlugin):
             .then(map_templates_to_configuration)
         )
 
-    def notify(self, event: Union[NotifyEventType, str], payload: dict, previous_value):
+    def notify(
+        self,
+        event: NotifyEventType | str,
+        payload_func: Callable[[], dict],
+        previous_value: None,
+    ) -> None:
         if not self.active:
             return previous_value
 
@@ -228,31 +255,17 @@ class AdminEmailPlugin(BasePlugin):
 
         event_func = event_map[event]
         config = asdict(self.config)
-        event_func(payload, config, self)
+        event_func(payload_func, config, self)
+        return previous_value
 
     @classmethod
     def validate_plugin_configuration(
         cls, plugin_configuration: "PluginConfiguration", **kwargs
     ):
         """Validate if provided configuration is correct."""
-
-        configuration = plugin_configuration.configuration
-        configuration = {item["name"]: item["value"] for item in configuration}
-
-        configuration["host"] = configuration["host"] or settings.EMAIL_HOST
-        configuration["port"] = configuration["port"] or settings.EMAIL_PORT
-        configuration["username"] = (
-            configuration["username"] or settings.EMAIL_HOST_USER
+        configuration = cls._parse_email_config_or_get_default(
+            plugin_configuration.configuration
         )
-        configuration["password"] = (
-            configuration["password"] or settings.EMAIL_HOST_PASSWORD
-        )
-        configuration["sender_address"] = (
-            configuration["sender_address"] or settings.DEFAULT_FROM_EMAIL
-        )
-        configuration["use_tls"] = configuration["use_tls"] or settings.EMAIL_USE_TLS
-        configuration["use_ssl"] = configuration["use_ssl"] or settings.EMAIL_USE_SSL
-
         validate_default_email_configuration(plugin_configuration, configuration)
 
         email_templates_data = kwargs.get("email_templates_data", [])
@@ -295,6 +308,10 @@ class AdminEmailPlugin(BasePlugin):
                     plugin_configuration=plugin_configuration,
                     defaults={"value": et_data["value"]},
                 )
+            else:
+                EmailTemplate.objects.filter(
+                    plugin_configuration=plugin_configuration, name=et_data["name"]
+                ).delete()
 
         if plugin_configuration.configuration:
             # Let's add a translated descriptions and labels

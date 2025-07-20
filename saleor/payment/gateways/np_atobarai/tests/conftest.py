@@ -5,9 +5,9 @@ from unittest.mock import patch
 import pytest
 
 from .....order.actions import create_refund_fulfillment
+from .....order.tests.fixtures import recalculate_order
 from .....plugins.manager import get_plugins_manager
 from .....plugins.models import PluginConfiguration
-from .....tests.fixtures import recalculate_order
 from ....interface import AddressData, PaymentLineData, PaymentLinesData
 from ..api_types import get_api_config
 from ..const import (
@@ -157,7 +157,7 @@ def create_refund(payment_dummy):
             payment.captured_amount -= amount
             payment.save(update_fields=["captured_amount"])
 
-        with patch("saleor.order.actions.gateway.refund", side_effect=mocked_refund):
+        with patch("saleor.payment.gateway.refund", side_effect=mocked_refund):
             return create_refund_fulfillment(
                 user=None,
                 app=None,

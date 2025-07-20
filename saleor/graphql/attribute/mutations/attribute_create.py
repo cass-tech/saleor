@@ -1,5 +1,3 @@
-from typing import Union
-
 import graphene
 from django.core.exceptions import ValidationError
 
@@ -10,11 +8,12 @@ from ....core.exceptions import PermissionDenied
 from ....permission.enums import PageTypePermissions, ProductTypePermissions
 from ....webhook.event_types import WebhookEventAsyncType
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_310, DEPRECATED_IN_3X_INPUT
+from ...core.context import ChannelContext
+from ...core.descriptions import DEPRECATED_IN_3X_INPUT
 from ...core.doc_category import DOC_CATEGORY_ATTRIBUTES
 from ...core.enums import MeasurementUnitsEnum
 from ...core.fields import JSONString
-from ...core.mutations import ModelMutation
+from ...core.mutations import DeprecatedModelMutation
 from ...core.types import AttributeError, BaseInputObjectType, NonNullList
 from ...core.utils import WebhookEventInfo
 from ...plugins.dataloaders import get_plugin_manager_promise
@@ -44,7 +43,7 @@ class AttributeValueInput(BaseInputObjectType):
     )
     content_type = graphene.String(required=False, description="File content type.")
     external_reference = graphene.String(
-        description="External ID of this attribute value." + ADDED_IN_310,
+        description="External ID of this attribute value.",
         required=False,
     )
 
@@ -93,7 +92,7 @@ class AttributeCreateInput(BaseInputObjectType):
         description=AttributeDescriptions.AVAILABLE_IN_GRID + DEPRECATED_IN_3X_INPUT,
     )
     external_reference = graphene.String(
-        description="External ID of this attribute." + ADDED_IN_310, required=False
+        description="External ID of this attribute.", required=False
     )
 
     class Meta:
@@ -106,7 +105,7 @@ class AttributeCreateInput(BaseInputObjectType):
         )
 
 
-class AttributeCreate(AttributeMixin, ModelMutation):
+class AttributeCreate(AttributeMixin, DeprecatedModelMutation):
     # Needed by AttributeMixin,
     # represents the input name for the passed list of values
     ATTRIBUTE_VALUES_FIELD = "values"
@@ -134,13 +133,15 @@ class AttributeCreate(AttributeMixin, ModelMutation):
     @classmethod
     def clean_input(cls, info: ResolveInfo, instance, data, **kwargs):
         cleaned_input = super().clean_input(info, instance, data, **kwargs)
-        if cleaned_input.get(
-            "input_type"
-        ) == AttributeInputType.REFERENCE and not cleaned_input.get("entity_type"):
+        is_reference_type = cleaned_input.get("input_type") in [
+            AttributeInputType.REFERENCE,
+            AttributeInputType.SINGLE_REFERENCE,
+        ]
+        if is_reference_type and not cleaned_input.get("entity_type"):
             raise ValidationError(
                 {
                     "entity_type": ValidationError(
-                        "Entity type is required when REFERENCE input type is used.",
+                        "Entity type is required for reference input type.",
                         code=AttributeErrorCode.REQUIRED.value,
                     )
                 }
@@ -152,7 +153,7 @@ class AttributeCreate(AttributeMixin, ModelMutation):
         cls, _root, info: ResolveInfo, /, *, input
     ):
         # check permissions based on attribute type
-        permissions: Union[tuple[ProductTypePermissions], tuple[PageTypePermissions]]
+        permissions: tuple[ProductTypePermissions] | tuple[PageTypePermissions]
         if input["type"] == AttributeTypeEnum.PRODUCT_TYPE.value:
             permissions = (ProductTypePermissions.MANAGE_PRODUCT_TYPES_AND_ATTRIBUTES,)
         else:
@@ -176,7 +177,7 @@ class AttributeCreate(AttributeMixin, ModelMutation):
         cls._save_m2m(info, instance, cleaned_input)
         cls.post_save_action(info, instance, cleaned_input)
         # Return the attribute that was created
-        return AttributeCreate(attribute=instance)
+        return AttributeCreate(attribute=ChannelContext(instance, None))
 
     @classmethod
     def post_save_action(cls, info: ResolveInfo, instance, cleaned_input):

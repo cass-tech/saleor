@@ -2,6 +2,7 @@ import graphene
 
 from ...payment import (
     ChargeStatus,
+    PaymentMethodType,
     StorePaymentMethod,
     TokenizedPaymentFlow,
     TransactionAction,
@@ -35,6 +36,13 @@ TransactionEventTypeEnum = to_enum(
 )
 TransactionEventTypeEnum.doc_category = DOC_CATEGORY_PAYMENTS
 
+PaymentMethodTypeEnum = to_enum(
+    PaymentMethodType,
+    type_name="PaymentMethodTypeEnum",
+    description=PaymentMethodType.__doc__,
+)
+PaymentMethodTypeEnum.doc_category = DOC_CATEGORY_PAYMENTS
+
 
 class OrderAction(BaseEnum):
     CAPTURE = "CAPTURE"
@@ -61,15 +69,15 @@ class OrderAction(BaseEnum):
 def description(enum):
     if enum is None:
         return "Enum representing the type of a payment storage in a gateway."
-    elif enum == StorePaymentMethodEnum.NONE:
+    if enum == StorePaymentMethodEnum.NONE:
         return "Storage is disabled. The payment is not stored."
-    elif enum == StorePaymentMethodEnum.ON_SESSION:
+    if enum == StorePaymentMethodEnum.ON_SESSION:
         return (
             "On session storage type. "
             "The payment is stored only to be reused when "
             "the customer is present in the checkout flow."
         )
-    elif enum == StorePaymentMethodEnum.OFF_SESSION:
+    if enum == StorePaymentMethodEnum.OFF_SESSION:
         return (
             "Off session storage type. "
             "The payment is stored to be reused even if the customer is absent."

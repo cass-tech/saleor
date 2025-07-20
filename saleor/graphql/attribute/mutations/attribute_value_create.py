@@ -8,7 +8,8 @@ from ....core.utils import generate_unique_slug
 from ....permission.enums import ProductPermissions
 from ....webhook.event_types import WebhookEventAsyncType
 from ...core import ResolveInfo
-from ...core.mutations import ModelMutation
+from ...core.context import ChannelContext
+from ...core.mutations import DeprecatedModelMutation
 from ...core.types import AttributeError
 from ...core.utils import WebhookEventInfo
 from ...plugins.dataloaders import get_plugin_manager_promise
@@ -18,7 +19,7 @@ from .mixins import AttributeMixin
 from .validators import validate_value_is_unique
 
 
-class AttributeValueCreate(AttributeMixin, ModelMutation):
+class AttributeValueCreate(AttributeMixin, DeprecatedModelMutation):
     ATTRIBUTE_VALUES_FIELD = "input"
 
     attribute = graphene.Field(Attribute, description="The updated attribute.")
@@ -103,7 +104,10 @@ class AttributeValueCreate(AttributeMixin, ModelMutation):
         instance.save()
         cls._save_m2m(info, instance, cleaned_input)
         cls.post_save_action(info, instance, cleaned_input)
-        return AttributeValueCreate(attribute=attribute, attributeValue=instance)
+        return AttributeValueCreate(
+            attribute=ChannelContext(attribute, None),
+            attributeValue=ChannelContext(instance, None),
+        )
 
     @classmethod
     def post_save_action(cls, info: ResolveInfo, instance, cleaned_input):

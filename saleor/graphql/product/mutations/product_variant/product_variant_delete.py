@@ -1,5 +1,3 @@
-from typing import Optional
-
 import graphene
 from django.core.exceptions import ValidationError
 from django.db.models import Exists, OuterRef
@@ -7,16 +5,15 @@ from django.db.models import Exists, OuterRef
 from .....attribute import AttributeInputType
 from .....attribute import models as attribute_models
 from .....core.tracing import traced_atomic_transaction
-from .....discount.utils import mark_active_catalogue_promotion_rules_as_dirty
+from .....discount.utils.promotion import mark_active_catalogue_promotion_rules_as_dirty
 from .....order import events as order_events
 from .....order import models as order_models
 from .....order.tasks import recalculate_orders_task
 from .....permission.enums import ProductPermissions
 from .....product import models
 from ....app.dataloaders import get_app_promise
-from ....channel import ChannelContext
 from ....core import ResolveInfo
-from ....core.descriptions import ADDED_IN_38, ADDED_IN_310
+from ....core.context import ChannelContext
 from ....core.mutations import ModelDeleteMutation, ModelWithExtRefMutation
 from ....core.types import ProductError
 from ....core.utils import ext_ref_to_global_id_or_error
@@ -33,11 +30,11 @@ class ProductVariantDelete(ModelDeleteMutation, ModelWithExtRefMutation):
         )
         external_reference = graphene.String(
             required=False,
-            description=f"External ID of a product variant to update. {ADDED_IN_310}",
+            description="External ID of a product variant to update.",
         )
         sku = graphene.String(
             required=False,
-            description="SKU of a product variant to delete." + ADDED_IN_38,
+            description="SKU of a product variant to delete.",
         )
 
     class Meta:
@@ -67,9 +64,9 @@ class ProductVariantDelete(ModelDeleteMutation, ModelWithExtRefMutation):
         info: ResolveInfo,
         /,
         *,
-        external_reference: Optional[str] = None,
-        id: Optional[str] = None,
-        sku: Optional[str] = None,
+        external_reference: str | None = None,
+        id: str | None = None,
+        sku: str | None = None,
     ):
         validate_one_of_args_is_in_mutation(
             "sku",
@@ -80,7 +77,7 @@ class ProductVariantDelete(ModelDeleteMutation, ModelWithExtRefMutation):
             external_reference,
         )
         node_id: str
-        instance: Optional[models.ProductVariant]
+        instance: models.ProductVariant | None
         if external_reference:
             id = ext_ref_to_global_id_or_error(
                 models.ProductVariant, external_reference=external_reference

@@ -2,18 +2,11 @@ import datetime
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Optional,
-    Union,
-    cast,
-)
+from typing import TYPE_CHECKING, Any, cast
 
 import graphene
-import pytz
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
@@ -21,19 +14,26 @@ from django.db.models import Exists, OuterRef, Q, QuerySet
 from prices import Money
 
 from ....checkout import models
+from ....checkout.actions import call_checkout_info_event
 from ....checkout.error_codes import CheckoutErrorCode
 from ....checkout.fetch import CheckoutInfo, CheckoutLineInfo
 from ....checkout.utils import (
+    assign_built_in_shipping_to_checkout,
+    assign_collection_point_to_checkout,
+    assign_external_shipping_to_checkout,
     calculate_checkout_quantity,
     clear_delivery_method,
-    delete_external_shipping_id,
     get_external_shipping_id,
+    invalidate_checkout,
     is_shipping_required,
+    remove_delivery_method_from_checkout,
+    remove_external_shipping_from_checkout,
 )
 from ....core.exceptions import InsufficientStock, PermissionDenied
 from ....discount import DiscountType, DiscountValueType
+from ....discount.interface import DiscountInfo
 from ....discount.models import CheckoutLineDiscount, PromotionRule
-from ....discount.utils import (
+from ....discount.utils.promotion import (
     create_gift_line,
     fetch_promotion_rules_for_checkout_or_order,
     get_best_rule,
@@ -44,11 +44,13 @@ from ....product.models import ProductChannelListing, ProductVariant
 from ....shipping import interface as shipping_interface
 from ....warehouse import models as warehouse_models
 from ....warehouse.availability import check_stock_and_preorder_quantity_bulk
+from ....webhook.event_types import WebhookEventAsyncType
 from ...core import ResolveInfo
 from ...core.validators import validate_one_of_args_is_in_mutation
 from ..types import Checkout
 
 if TYPE_CHECKING:
+    from ....plugins.manager import PluginsManager
     from ...core.mutations import BaseMutation
 
 
@@ -61,34 +63,23 @@ ERROR_CC_ADDRESS_CHANGE_FORBIDDEN = (
 
 @dataclass
 class CheckoutLineData:
-    variant_id: Optional[str] = None
-    line_id: Optional[str] = None
+    variant_id: str | None = None
+    line_id: str | None = None
     quantity: int = 0
     quantity_to_update: bool = False
-    custom_price: Optional[Decimal] = None
+    custom_price: Decimal | None = None
     custom_price_to_update: bool = False
-    metadata_list: Optional[list] = None
+    metadata_list: list = field(default_factory=list)
 
 
 def clean_delivery_method(
     checkout_info: "CheckoutInfo",
-    lines: Iterable[CheckoutLineInfo],
-    method: Optional[
-        Union[
-            shipping_interface.ShippingMethodData,
-            warehouse_models.Warehouse,
-        ]
-    ],
+    method: shipping_interface.ShippingMethodData | warehouse_models.Warehouse | None,
 ) -> bool:
     """Check if current shipping method is valid."""
     if not method:
         # no shipping method was provided, it is valid
         return True
-
-    if not is_shipping_required(lines):
-        raise ValidationError(
-            ERROR_DOES_NOT_SHIP, code=CheckoutErrorCode.SHIPPING_NOT_REQUIRED.value
-        )
 
     if not checkout_info.shipping_address and isinstance(
         method, shipping_interface.ShippingMethodData
@@ -99,8 +90,10 @@ def clean_delivery_method(
             code=CheckoutErrorCode.SHIPPING_ADDRESS_NOT_SET.value,
         )
 
-    valid_methods = checkout_info.valid_delivery_methods
-    return method in valid_methods
+    if isinstance(method, shipping_interface.ShippingMethodData):
+        return method in checkout_info.valid_shipping_methods
+
+    return method in checkout_info.valid_pick_up_points
 
 
 def _is_external_shipping_valid(checkout_info: "CheckoutInfo") -> bool:
@@ -112,29 +105,35 @@ def _is_external_shipping_valid(checkout_info: "CheckoutInfo") -> bool:
 
 
 def update_checkout_external_shipping_method_if_invalid(
-    checkout_info: "CheckoutInfo", lines: Iterable[CheckoutLineInfo]
+    checkout_info: "CheckoutInfo", lines: list[CheckoutLineInfo]
 ):
     if not _is_external_shipping_valid(checkout_info):
-        delete_external_shipping_id(checkout_info.checkout, save=True)
+        remove_external_shipping_from_checkout(checkout_info.checkout, save=True)
 
 
 def update_checkout_shipping_method_if_invalid(
-    checkout_info: "CheckoutInfo", lines: Iterable[CheckoutLineInfo]
-):
+    checkout_info: "CheckoutInfo", lines: list[CheckoutLineInfo]
+) -> list[str]:
+    """Check if current shipping method is valid and clean it if not.
+
+    The method is not saving the applied changes on checkout.
+    """
     quantity = calculate_checkout_quantity(lines)
+    update_fields = []
 
     # remove shipping method when empty checkout
     if quantity == 0 or not is_shipping_required(lines):
-        clear_delivery_method(checkout_info)
+        update_fields = clear_delivery_method(checkout_info)
 
     is_valid = clean_delivery_method(
         checkout_info=checkout_info,
-        lines=lines,
-        method=checkout_info.delivery_method_info.delivery_method,
+        method=checkout_info.get_delivery_method_info().delivery_method,
     )
 
     if not is_valid:
-        clear_delivery_method(checkout_info)
+        update_fields = clear_delivery_method(checkout_info)
+
+    return update_fields
 
 
 def get_variants_and_total_quantities(
@@ -143,7 +142,7 @@ def get_variants_and_total_quantities(
     quantity_to_update_check=False,
 ):
     variants_total_quantity_map: defaultdict[ProductVariant, int] = defaultdict(int)
-    mapped_data: defaultdict[Optional[str], int] = defaultdict(int)
+    mapped_data: defaultdict[str | None, int] = defaultdict(int)
 
     if quantity_to_update_check:
         lines_data = filter(lambda d: d.quantity_to_update, lines_data)
@@ -190,7 +189,7 @@ def check_lines_quantity(
                 }
             )
 
-        elif allow_zero_quantity and quantity < 0:
+        if allow_zero_quantity and quantity < 0:
             raise ValidationError(
                 {
                     "quantity": ValidationError(
@@ -220,13 +219,13 @@ def check_lines_quantity(
             )
             for item in e.items
         ]
-        raise ValidationError({"quantity": errors})
+        raise ValidationError({"quantity": errors}) from e
 
 
 def get_not_available_variants_for_purchase(
     variants_id: set, channel_id: int
 ) -> tuple[set[int], set[str]]:
-    today = datetime.datetime.now(pytz.UTC)
+    today = datetime.datetime.now(tz=datetime.UTC)
     is_available_for_purchase = Q(
         available_for_purchase_at__lte=today,
         product__variants__id__in=variants_id,
@@ -298,7 +297,7 @@ def validate_variants_are_published(
 
 
 def get_checkout_by_token(
-    token: uuid.UUID, qs: Optional[QuerySet[models.Checkout]] = None
+    token: uuid.UUID, qs: QuerySet[models.Checkout] | None = None
 ):
     if qs is None:
         qs = models.Checkout.objects.select_related(
@@ -310,7 +309,7 @@ def get_checkout_by_token(
         )
     try:
         checkout = qs.get(token=token)
-    except ObjectDoesNotExist:
+    except ObjectDoesNotExist as e:
         raise ValidationError(
             {
                 "token": ValidationError(
@@ -318,17 +317,17 @@ def get_checkout_by_token(
                     code=CheckoutErrorCode.NOT_FOUND.value,
                 )
             }
-        )
+        ) from e
     return checkout
 
 
 def get_checkout(
     mutation_class: type["BaseMutation"],
     info: ResolveInfo,
-    checkout_id: Optional[str] = None,
-    token: Optional[uuid.UUID] = None,
-    id: Optional[str] = None,
-    qs: Optional[QuerySet] = None,
+    checkout_id: str | None = None,
+    token: uuid.UUID | None = None,
+    id: str | None = None,
+    qs: QuerySet | None = None,
 ):
     """Return checkout by using the current id field or the deprecated one.
 
@@ -378,13 +377,13 @@ def group_lines_input_on_add(
     for line in lines:
         variant_id = cast(str, line.get("variant_id"))
         force_new_line = line.get("force_new_line")
-        metadata_list = line.get("metadata")
+        metadata_list_from_input = line.get("metadata", [])
 
         _, variant_db_id = graphene.Node.from_global_id(variant_id)
 
         if force_new_line:
             line_data = CheckoutLineData(
-                variant_id=variant_db_id, metadata_list=metadata_list
+                variant_id=variant_db_id, metadata_list=metadata_list_from_input
             )
             grouped_checkout_lines_data.append(line_data)
         else:
@@ -397,24 +396,22 @@ def group_lines_input_on_add(
 
                 if not line_db_id:
                     line_data = checkout_lines_data_map[variant_db_id]
+
                     line_data.variant_id = variant_db_id
-                    line_data.metadata_list = metadata_list
                 else:
                     line_data = checkout_lines_data_map[line_db_id]
+
                     line_data.line_id = line_db_id
                     line_data.variant_id = find_variant_id_when_line_parameter_used(
                         line_db_id, existing_lines_info
                     )
 
-                    if line_data.metadata_list and metadata_list:
-                        line_data.metadata_list += metadata_list
-                    else:
-                        line_data.metadata_list = metadata_list
+                line_data.metadata_list += metadata_list_from_input
 
             # when variant already exist in multiple lines then create a new line
             except ValidationError:
                 line_data = CheckoutLineData(
-                    variant_id=variant_db_id, metadata_list=metadata_list
+                    variant_id=variant_db_id, metadata_list=metadata_list_from_input
                 )
                 grouped_checkout_lines_data.append(line_data)
 
@@ -445,6 +442,7 @@ def group_lines_input_data_on_update(
     for line in lines:
         variant_id = cast(str, line.get("variant_id"))
         line_id = cast(str, line.get("line_id"))
+        metadata_list_from_input = line.get("metadata", [])
 
         line_db_id, variant_db_id = None, None
         if line_id:
@@ -474,6 +472,8 @@ def group_lines_input_data_on_update(
             line_data.custom_price = line["price"]
             line_data.custom_price_to_update = True
 
+        line_data.metadata_list += metadata_list_from_input
+
     grouped_checkout_lines_data += list(checkout_lines_data_map.values())
     return grouped_checkout_lines_data
 
@@ -484,7 +484,7 @@ def check_permissions_for_custom_prices(app, lines):
     Checkout line custom price can be changed only by app with
     handle checkout permission.
     """
-    if any(["price" in line for line in lines]) and (
+    if any("price" in line for line in lines) and (
         not app or not app.has_perm(CheckoutPermissions.HANDLE_CHECKOUTS)
     ):
         raise PermissionDenied(permissions=[CheckoutPermissions.HANDLE_CHECKOUTS])
@@ -492,18 +492,18 @@ def check_permissions_for_custom_prices(app, lines):
 
 def find_line_id_when_variant_parameter_used(
     variant_db_id: str, lines_info: list[CheckoutLineInfo]
-):
+) -> None | str:
     """Return line id when variantId parameter was used.
 
     If variant exists in multiple lines error will be returned.
     """
     if not lines_info:
-        return
+        return None
 
     line_info = list(filter(lambda x: (x.variant.pk == int(variant_db_id)), lines_info))
 
     if not line_info:
-        return
+        return None
 
     # if same variant occur in multiple lines `lineId` parameter have to be used
     if len(line_info) > 1:
@@ -527,10 +527,10 @@ def find_line_id_when_variant_parameter_used(
 
 def find_variant_id_when_line_parameter_used(
     line_db_id: str, lines_info: list[CheckoutLineInfo]
-):
+) -> None | str:
     """Return variant id when lineId parameter was used."""
     if not lines_info:
-        return
+        return None
 
     line_info = list(filter(lambda x: (str(x.line.pk) == line_db_id), lines_info))
     return str(line_info[0].line.variant_id)
@@ -569,17 +569,19 @@ def apply_gift_reward_if_applicable_on_checkout_creation(
     if not gift_listing:
         return
 
+    line_discount_data = DiscountInfo(
+        type=DiscountType.ORDER_PROMOTION,
+        amount_value=best_discount_amount,
+        value_type=DiscountValueType.FIXED,
+        value=best_discount_amount,
+        promotion_rule=best_rule,
+        currency=checkout.currency,
+    )
     with transaction.atomic():
-        line, _line_created = create_gift_line(checkout, gift_listing.variant_id)
-        CheckoutLineDiscount.objects.create(
-            type=DiscountType.ORDER_PROMOTION,
-            line=line,
-            amount_value=best_discount_amount,
-            value_type=DiscountValueType.FIXED,
-            value=best_discount_amount,
-            promotion_rule=best_rule,
-            currency=checkout.currency,
+        line, _line_created = create_gift_line(
+            checkout, gift_listing, line_discount_data
         )
+        CheckoutLineDiscount.objects.create(line=line, **asdict(line_discount_data))
 
 
 def _set_checkout_base_subtotal_and_total_on_checkout_creation(
@@ -594,15 +596,68 @@ def _set_checkout_base_subtotal_and_total_on_checkout_creation(
             channel_id=checkout.channel_id,
         ).values_list("variant_id", "discounted_price_amount", "price_amount")
     }
-    subtotal = Decimal("0")
+    subtotal = Decimal(0)
     for line in checkout.lines.all():
         if price_amount := line.price_override:
             price = price_amount
         else:
-            price = variant_id_to_discounted_price.get(line.variant_id) or Decimal("0")
+            price = variant_id_to_discounted_price.get(line.variant_id) or Decimal(0)
         subtotal += price * line.quantity
     checkout.base_subtotal = Money(subtotal, checkout.currency)
     # base total and subtotal is the same, as there is no option to set the
     # delivery method during checkout creation
     checkout.base_total = checkout.base_subtotal
     checkout.save(update_fields=["base_subtotal_amount", "base_total_amount"])
+
+
+def assign_delivery_method_to_checkout(
+    checkout_info: CheckoutInfo,
+    lines_info: list[CheckoutLineInfo],
+    manager: "PluginsManager",
+    delivery_method_data: (
+        shipping_interface.ShippingMethodData | warehouse_models.Warehouse | None
+    ),
+):
+    fields_to_update = []
+    checkout = checkout_info.checkout
+    with transaction.atomic():
+        if delivery_method_data is None:
+            fields_to_update = remove_delivery_method_from_checkout(
+                checkout=checkout_info.checkout
+            )
+            checkout_info.shipping_method = None
+            checkout_info.collection_point = None
+
+        elif isinstance(delivery_method_data, shipping_interface.ShippingMethodData):
+            if delivery_method_data.is_external:
+                fields_to_update = assign_external_shipping_to_checkout(
+                    checkout, delivery_method_data
+                )
+                checkout_info.shipping_method = None
+                checkout_info.collection_point = None
+            else:
+                fields_to_update = assign_built_in_shipping_to_checkout(
+                    checkout, delivery_method_data
+                )
+                checkout_info.shipping_method = checkout.shipping_method
+                checkout_info.collection_point = None
+        elif isinstance(delivery_method_data, warehouse_models.Warehouse):
+            fields_to_update = assign_collection_point_to_checkout(
+                checkout, delivery_method_data
+            )
+            checkout_info.shipping_address = checkout.shipping_address
+            checkout_info.shipping_method = None
+
+        if not fields_to_update:
+            return
+
+        invalidate_prices_updated_fields = invalidate_checkout(
+            checkout_info, lines_info, manager, save=False
+        )
+        checkout.save(update_fields=fields_to_update + invalidate_prices_updated_fields)
+        call_checkout_info_event(
+            manager,
+            event_name=WebhookEventAsyncType.CHECKOUT_UPDATED,
+            checkout_info=checkout_info,
+            lines=lines_info,
+        )

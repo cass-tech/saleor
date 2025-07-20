@@ -1,12 +1,11 @@
+import datetime
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
 import graphene
 import pytest
-import pytz
 from freezegun import freeze_time
 from prices import Money
 
@@ -166,7 +165,7 @@ def test_clean_product_attributes_date_time_range_filter_input(
     filter_value = [
         (
             date_attribute.slug,
-            {"gte": datetime(2020, 10, 5, tzinfo=pytz.utc)},
+            {"gte": datetime.datetime(2020, 10, 5, tzinfo=datetime.UTC)},
         )
     ]
     values_qs = _clean_product_attributes_date_time_range_filter_input(
@@ -178,7 +177,10 @@ def test_clean_product_attributes_date_time_range_filter_input(
     filter_value = [
         (
             date_attribute.slug,
-            {"gte": datetime(2020, 10, 5).date(), "lte": datetime(2020, 11, 4).date()},
+            {
+                "gte": datetime.datetime(2020, 10, 5, tzinfo=datetime.UTC).date(),
+                "lte": datetime.datetime(2020, 11, 4, tzinfo=datetime.UTC).date(),
+            },
         )
     ]
     values_qs = _clean_product_attributes_date_time_range_filter_input(
@@ -193,7 +195,7 @@ def test_clean_product_attributes_date_time_range_filter_input(
     filter_value = [
         (
             date_attribute.slug,
-            {"lte": datetime(2020, 11, 4, tzinfo=timezone.utc)},
+            {"lte": datetime.datetime(2020, 11, 4, tzinfo=datetime.UTC)},
         )
     ]
     values_qs = _clean_product_attributes_date_time_range_filter_input(
@@ -207,7 +209,7 @@ def test_clean_product_attributes_date_time_range_filter_input(
     filter_value = [
         (
             date_attribute.slug,
-            {"lte": datetime(2020, 10, 4, tzinfo=timezone.utc)},
+            {"lte": datetime.datetime(2020, 10, 4, tzinfo=datetime.UTC)},
         )
     ]
     values_qs = _clean_product_attributes_date_time_range_filter_input(
@@ -331,10 +333,10 @@ def test_get_price_overridden_price_with_discount(
         price_amount=price_amount,
         currency=channel_USD.currency_code,
     )
-    price_override = Decimal("20")
+    price_override = Decimal(20)
 
-    reward_value_1 = Decimal("10")
-    reward_value_2 = Decimal("5")
+    reward_value_1 = Decimal(10)
+    reward_value_2 = Decimal(5)
     rule_1, rule_2 = PromotionRule.objects.bulk_create(
         [
             PromotionRule(

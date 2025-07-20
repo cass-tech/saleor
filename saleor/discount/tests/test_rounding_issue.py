@@ -1,6 +1,5 @@
 from decimal import Decimal
 
-import graphene
 import pytest
 
 from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
@@ -10,32 +9,10 @@ from ...plugins.manager import get_plugins_manager
 from ...product.models import Product, ProductVariantChannelListing
 from ...product.utils.variant_prices import update_discounted_prices_for_promotion
 from ...product.utils.variants import fetch_variants_for_promotion_rules
-from .. import DiscountValueType, RewardValueType
-from ..models import Promotion
-from ..utils import create_or_update_discount_objects_from_promotion_for_checkout
-
-
-@pytest.fixture
-def promotion_10_percentage(channel_USD, product_list, product):
-    promotion = Promotion.objects.create(
-        name="Promotion",
-    )
-    product_list.append(product)
-    rule = promotion.rules.create(
-        name="10% promotion rule",
-        catalogue_predicate={
-            "productPredicate": {
-                "ids": [
-                    graphene.Node.to_global_id("Product", product.id)
-                    for product in product_list
-                ]
-            }
-        },
-        reward_value_type=RewardValueType.PERCENTAGE,
-        reward_value=Decimal("10"),
-    )
-    rule.channels.add(channel_USD)
-    return promotion
+from .. import DiscountValueType
+from ..utils.checkout import (
+    create_or_update_discount_objects_from_promotion_for_checkout,
+)
 
 
 @pytest.mark.parametrize(
@@ -87,7 +64,7 @@ def test_rounding_issue_with_percentage_promotion(
     product_list.append(product)
     variants = []
     variant_channel_listings = []
-    for product, price in zip(product_list, variant_prices):
+    for product, price in zip(product_list, variant_prices, strict=False):
         variant = product.variants.get()
         variant_channel_listing = variant.channel_listings.get(channel=channel_USD)
         variant_channel_listing.price_amount = price
@@ -118,7 +95,9 @@ def test_rounding_issue_with_percentage_promotion(
     )
 
     # then
-    for line_info, expected_discount in zip(lines_info, expected_discounts):
+    for line_info, expected_discount in zip(
+        lines_info, expected_discounts, strict=False
+    ):
         assert len(line_info.discounts) == 1
         discount_from_info = line_info.discounts[0]
         discount_from_db = line_info.line.discounts.get()

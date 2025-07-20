@@ -3,8 +3,8 @@ import graphene
 from ....core.tracing import traced_atomic_transaction
 from ....permission.enums import SitePermissions
 from ....product import models as product_models
-from ...channel import ChannelContext
 from ...core import ResolveInfo
+from ...core.context import ChannelContext
 from ...core.enums import LanguageCodeEnum
 from ...core.types import TranslationError
 from ...plugins.dataloaders import get_plugin_manager_promise
@@ -51,8 +51,8 @@ class ProductVariantTranslate(BaseTranslateMutation):
         cls.call_event(manager.product_variant_updated, context.node)
 
         if created:
-            cls.call_event(manager.translation_created, translation)
+            cls.call_event(manager.translations_created, [translation])
         else:
-            cls.call_event(manager.translation_updated, translation)
+            cls.call_event(manager.translations_updated, [translation])
 
         return cls(**{cls._meta.return_field_name: context})

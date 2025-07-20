@@ -14,7 +14,8 @@ from ..models import User
 from ..validators import validate_possible_number
 
 
-@pytest.mark.parametrize("country", ["CN", "PL", "US", "IE"])
+# Don't remove `XK` from the list of countries, it is override defined in saleor.settings.COUNTRIES_OVERRIDE.
+@pytest.mark.parametrize("country", ["CN", "PL", "US", "IE", "XK"])
 def test_address_form_for_country(country):
     # given
     data = {
@@ -67,6 +68,39 @@ def test_address_form_postal_code_validation():
     errors = form.errors
     # then
     assert "postal_code" in errors
+
+
+def test_address_form_Japanese_city_is_excluded_from_normalization():
+    # given
+    data = {
+        "first_name": "John",
+        "last_name": "Doe",
+        "street_address_1": "2344 Oya",
+        "country": "JP",
+        "country_area": "Saitama",
+        "city": "Fukaya-Shi",
+        "postal_code": "366-0814",
+    }
+    form = forms.get_address_form(data, country_code="JP")
+
+    # when
+    validated_address = form.validate_address(data)
+
+    # then
+    assert validated_address["city"] == "Fukaya-Shi"
+    assert not form.errors
+
+
+def test_city_is_allowed_in_Japanese_addresses():
+    # given
+
+    # when
+    country_rules = i18naddress.get_validation_rules({"country_code": "JP"})
+
+    # the
+    assert "city" in country_rules.allowed_fields
+    assert "%C" in country_rules.address_format
+    assert "%C" in country_rules.address_latin_format
 
 
 def test_address_form_long_street_address_validation():
@@ -213,6 +247,7 @@ def test_address_as_data(address):
         "phone": "+48713988102",
         "metadata": {},
         "private_metadata": {},
+        "validation_skipped": False,
     }
 
 
@@ -297,10 +332,12 @@ def test_customers_doesnt_return_duplicates(customer_user, channel_USD):
             Order(
                 user=customer_user,
                 channel=channel_USD,
+                lines_count=0,
             ),
             Order(
                 user=customer_user,
                 channel=channel_USD,
+                lines_count=0,
             ),
         ]
     )
@@ -312,6 +349,7 @@ def test_customers_show_staff_with_order(admin_user, channel_USD):
     Order.objects.create(
         user=admin_user,
         channel=channel_USD,
+        lines_count=0,
     )
     assert User.objects.customers().count() == 1
 

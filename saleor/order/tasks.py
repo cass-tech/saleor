@@ -1,18 +1,26 @@
+import datetime
 import logging
-from datetime import timedelta
+from collections import Counter
 
+from django.conf import settings
 from django.db.models import Exists, F, Func, OuterRef, Subquery, Value
+from django.db.models.functions import Greatest
 from django.utils import timezone
 
+from ..account.lock_objects import user_qs_select_for_update
+from ..account.models import User
 from ..celeryconf import app
 from ..channel.models import Channel
+from ..core.db.connection import allow_writer
 from ..core.tracing import traced_atomic_transaction
-from ..core.utils.events import call_event
 from ..discount.models import Voucher, VoucherCode, VoucherCustomer
 from ..payment.models import Payment, TransactionItem
 from ..plugins.manager import get_plugins_manager
 from ..warehouse.management import deallocate_stock_for_orders
+from ..webhook.event_types import WebhookEventAsyncType, WebhookEventSyncType
+from ..webhook.utils import get_webhooks_for_multiple_events
 from . import OrderEvents, OrderStatus
+from .actions import call_order_event, call_order_events
 from .models import Order, OrderEvent
 from .utils import invalidate_order_prices
 
@@ -27,6 +35,7 @@ DELETE_EXPIRED_ORDER_BATCH_SIZE = 5000
 
 
 @app.task
+@allow_writer()
 def recalculate_orders_task(order_ids: list[int]):
     orders = Order.objects.filter(id__in=order_ids)
 
@@ -37,10 +46,22 @@ def recalculate_orders_task(order_ids: list[int]):
 
 
 @app.task
+@allow_writer()
 def send_order_updated(order_ids):
     manager = get_plugins_manager(allow_replica=True)
+    webhook_event_map = get_webhooks_for_multiple_events(
+        [
+            WebhookEventAsyncType.ORDER_UPDATED,
+            *WebhookEventSyncType.ORDER_EVENTS,
+        ]
+    )
     for order in Order.objects.filter(id__in=order_ids):
-        manager.order_updated(order)
+        call_order_event(
+            manager,
+            WebhookEventAsyncType.ORDER_UPDATED,
+            order,
+            webhook_event_map=webhook_event_map,
+        )
 
 
 def _bulk_release_voucher_usage(order_ids):
@@ -48,33 +69,62 @@ def _bulk_release_voucher_usage(order_ids):
         voucher_code=OuterRef("code"),
         id__in=order_ids,
     )
-    count_orders = voucher_orders.annotate(
-        count=Func(F("pk"), function="Count")
-    ).values("count")
+    count_orders = (
+        voucher_orders.annotate(count=Func(F("pk"), function="Count"))
+        .values("count")
+        .order_by()
+    )
 
     vouchers = Voucher.objects.filter(usage_limit__isnull=False)
-    VoucherCode.objects.filter(
+    codes = VoucherCode.objects.filter(
         Exists(voucher_orders),
         Exists(vouchers.filter(id=OuterRef("voucher_id"))),
-    ).annotate(order_count=Subquery(count_orders)).update(
-        used=F("used") - F("order_count")
-    )
+    ).annotate(order_count=Subquery(count_orders))
+
+    codes.update(used=Greatest(F("used") - F("order_count"), 0))
 
     orders = Order.objects.filter(id__in=order_ids)
     voucher_codes = VoucherCode.objects.filter(
         Exists(orders.filter(voucher_code=OuterRef("code")))
     )
+    # Only delete voucher customers for orders that have no user associated
+    # as voucher are associated with user's email account
     VoucherCustomer.objects.filter(
         Exists(voucher_codes.filter(id=OuterRef("voucher_code_id"))),
-        Exists(orders.filter(user_email=OuterRef("customer_email"))),
+        Exists(
+            orders.filter(user_email=OuterRef("customer_email"), user_id__isnull=True)
+        ),
+    ).delete()
+
+    VoucherCustomer.objects.filter(
+        Exists(voucher_codes.filter(id=OuterRef("voucher_code_id"))),
+        Exists(orders.filter(user__email=OuterRef("customer_email"))),
     ).delete()
 
 
 def _call_expired_order_events(order_ids, manager):
-    orders = Order.objects.filter(id__in=order_ids)
+    orders = (
+        Order.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME)
+        .filter(id__in=order_ids)
+        .select_related("channel")
+    )
+    webhook_event_map = get_webhooks_for_multiple_events(
+        [
+            WebhookEventAsyncType.ORDER_EXPIRED,
+            WebhookEventAsyncType.ORDER_UPDATED,
+            *WebhookEventSyncType.ORDER_EVENTS,
+        ]
+    )
     for order in orders:
-        call_event(manager.order_expired, order)
-        call_event(manager.order_updated, order)
+        call_order_events(
+            manager,
+            [
+                WebhookEventAsyncType.ORDER_EXPIRED,
+                WebhookEventAsyncType.ORDER_UPDATED,
+            ],
+            order,
+            webhook_event_map=webhook_event_map,
+        )
 
 
 def _order_expired_events(order_ids):
@@ -89,25 +139,26 @@ def _order_expired_events(order_ids):
     )
 
 
+@allow_writer()
 def _expire_orders(manager, now):
     time_diff_func_in_minutes = (
         Func(Value("day"), now - OuterRef("created_at"), function="DATE_PART") * 24
         + Func(Value("hour"), now - OuterRef("created_at"), function="DATE_PART") * 60
     ) + Func(Value("minute"), now - OuterRef("created_at"), function="DATE_PART")
-
-    channels = Channel.objects.filter(
+    channels = Channel.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME).filter(
         id=OuterRef("channel"),
         expire_orders_after__isnull=False,
         expire_orders_after__gt=0,
         expire_orders_after__lte=time_diff_func_in_minutes,
     )
 
-    qs = Order.objects.filter(
+    qs = Order.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME).filter(
         ~Exists(TransactionItem.objects.filter(order=OuterRef("pk"))),
         ~Exists(Payment.objects.filter(order=OuterRef("pk"))),
         Exists(channels),
         status=OrderStatus.UNCONFIRMED,
     )
+
     ids_batch = list(qs.values_list("pk", flat=True)[:EXPIRE_ORDER_BATCH_SIZE])
     with traced_atomic_transaction():
         Order.objects.filter(id__in=ids_batch).update(
@@ -122,7 +173,7 @@ def _expire_orders(manager, now):
 @app.task
 def expire_orders_task():
     now = timezone.now()
-    manager = get_plugins_manager(allow_replica=False)
+    manager = get_plugins_manager(allow_replica=True)
     _expire_orders(manager, now)
 
 
@@ -130,24 +181,61 @@ def expire_orders_task():
 def delete_expired_orders_task():
     now = timezone.now()
 
-    channel_qs = Channel.objects.filter(
-        delete_expired_orders_after__gt=timedelta(),
+    channel_qs = Channel.objects.using(
+        settings.DATABASE_CONNECTION_REPLICA_NAME
+    ).filter(
+        delete_expired_orders_after__gt=datetime.timedelta(),
         id=OuterRef("channel"),
     )
 
-    qs = Order.objects.annotate(
-        delete_expired_orders_after=Subquery(
-            channel_qs.values("delete_expired_orders_after")[:1]
+    qs = (
+        Order.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME)
+        .annotate(
+            delete_expired_orders_after=Subquery(
+                channel_qs.values("delete_expired_orders_after")[:1]
+            )
         )
-    ).filter(
-        ~Exists(TransactionItem.objects.filter(order=OuterRef("pk"))),
-        ~Exists(Payment.objects.filter(order=OuterRef("pk"))),
-        expired_at__isnull=False,
-        status=OrderStatus.EXPIRED,
-        expired_at__lte=now - F("delete_expired_orders_after"),  # type:ignore
+        .filter(
+            ~Exists(TransactionItem.objects.filter(order=OuterRef("pk"))),
+            ~Exists(Payment.objects.filter(order=OuterRef("pk"))),
+            expired_at__isnull=False,
+            status=OrderStatus.EXPIRED,
+            expired_at__lte=now - F("delete_expired_orders_after"),  # type:ignore[operator]
+        )
     )
     ids_batch = qs.values_list("pk", flat=True)[:DELETE_EXPIRED_ORDER_BATCH_SIZE]
     if not ids_batch:
         return
-    Order.objects.filter(id__in=ids_batch).delete()
+
+    # Wrap ids_batch with a list as it comes from the replica DB and delete is done on
+    # the writer DB. This avoids mixing querysets from different DBs.
+    ids_batch = list(ids_batch)
+    user_orders_count = Counter(
+        Order.objects.filter(id__in=ids_batch, user_id__isnull=False)
+        .using(settings.DATABASE_CONNECTION_REPLICA_NAME)
+        .values_list("user_id", flat=True)
+    )
+
+    with allow_writer():
+        Order.objects.filter(id__in=ids_batch).delete()
+
+    reduce_user_number_of_orders(user_orders_count)
+
     delete_expired_orders_task.delay()
+
+
+@allow_writer()
+def reduce_user_number_of_orders(user_orders_count: dict[int, int]):
+    user_ids = list(user_orders_count.keys())
+    users_to_update = []
+    with traced_atomic_transaction():
+        users = user_qs_select_for_update().filter(id__in=user_ids)
+        users_in_bulk = users.in_bulk()
+        for user_id, order_count in user_orders_count.items():
+            user = users_in_bulk.get(user_id)
+            if user:
+                user.number_of_orders = max(user.number_of_orders - order_count, 0)
+                users_to_update.append(user)
+
+        if users_to_update:
+            User.objects.bulk_update(users_to_update, ["number_of_orders"])

@@ -3,7 +3,6 @@ import graphene
 from ...permission.enums import OrderPermissions, PaymentPermissions
 from ..core import ResolveInfo
 from ..core.connection import create_connection_slice, filter_connection_queryset
-from ..core.descriptions import ADDED_IN_36, PREVIEW_FEATURE
 from ..core.doc_category import DOC_CATEGORY_PAYMENTS
 from ..core.fields import FilterConnectionField, PermissionsField
 from ..core.scalars import UUID
@@ -55,7 +54,7 @@ class PaymentQueries(graphene.ObjectType):
     )
     transaction = PermissionsField(
         TransactionItem,
-        description="Look up a transaction by ID." + ADDED_IN_36 + PREVIEW_FEATURE,
+        description="Look up a transaction by ID.",
         id=graphene.Argument(
             graphene.ID,
             description=(
@@ -100,7 +99,9 @@ class PaymentQueries(graphene.ObjectType):
         # If token is provided we ignore the id input.
         if token:
             return resolve_transaction(info, str(token))
-        _, id = from_global_id_or_error(id, TransactionItem)  # type: ignore[arg-type]
+        _, id = from_global_id_or_error(
+            global_id=str(id), only_type=TransactionItem, raise_error=True
+        )
         return resolve_transaction(info, id)
 
 

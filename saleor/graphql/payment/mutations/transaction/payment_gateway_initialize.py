@@ -2,7 +2,6 @@ import graphene
 from django.conf import settings
 
 from .....payment.interface import PaymentGatewayData
-from ....core.descriptions import ADDED_IN_313, PREVIEW_FEATURE
 from ....core.doc_category import DOC_CATEGORY_PAYMENTS
 from ....core.enums import PaymentGatewayInitializeErrorCode
 from ....core.scalars import JSON, PositiveDecimal
@@ -68,8 +67,6 @@ class PaymentGatewayInitialize(TransactionSessionBase):
             "If `paymentGateways` is not provided, the webhook will be send to all "
             "subscribed payment gateways. There is a limit of "
             f"{settings.TRANSACTION_ITEMS_LIMIT} transaction items per checkout / order."
-            + ADDED_IN_313
-            + PREVIEW_FEATURE
         )
         error_type_class = common_types.PaymentGatewayInitializeError
 
@@ -93,7 +90,7 @@ class PaymentGatewayInitialize(TransactionSessionBase):
             app_identifier = identifier
             payment_gateway_response = payment_gateways_response_dict.get(identifier)
             if payment_gateway_response:
-                response_data = payment_gateway_response.data
+                data_to_return = payment_gateway_response.data
                 errors = []
                 if payment_gateway_response.error:
                     code = common_types.PaymentGatewayConfigErrorCode.INVALID.value
@@ -106,7 +103,7 @@ class PaymentGatewayInitialize(TransactionSessionBase):
                     ]
 
             else:
-                response_data = None
+                data_to_return = None
                 code = common_types.PaymentGatewayConfigErrorCode.NOT_FOUND.value
                 msg = (
                     "Active app with `HANDLE_PAYMENT` permissions or "
@@ -119,7 +116,6 @@ class PaymentGatewayInitialize(TransactionSessionBase):
                         "code": code,
                     }
                 ]
-            data_to_return = response_data.get("data") if response_data else None
             response.append(
                 PaymentGatewayConfig(
                     id=app_identifier, data=data_to_return, errors=errors
@@ -128,7 +124,7 @@ class PaymentGatewayInitialize(TransactionSessionBase):
         return response
 
     @classmethod
-    def perform_mutation(cls, root, info, *, id, amount=None, payment_gateways=None):
+    def perform_mutation(cls, root, info, *, id, amount=None, payment_gateways=None):  # type: ignore[override]
         manager = get_plugin_manager_promise(info.context).get()
         source_object = cls.clean_source_object(
             info,

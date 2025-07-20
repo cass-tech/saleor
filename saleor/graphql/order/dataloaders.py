@@ -1,6 +1,7 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import cast
+from uuid import UUID
 
 from django.db.models import F
 
@@ -45,7 +46,7 @@ class OrderLinesByVariantIdAndChannelIdLoader(
         return [order_line_by_variant_and_channel_map[key] for key in keys]
 
 
-class OrderByIdLoader(DataLoader):
+class OrderByIdLoader(DataLoader[UUID, Order]):
     context_key = "order_by_id"
 
     def batch_load(self, keys):
@@ -53,7 +54,7 @@ class OrderByIdLoader(DataLoader):
         return [orders.get(order_id) for order_id in keys]
 
 
-class OrderByNumberLoader(DataLoader):
+class OrderByNumberLoader(DataLoader[str, Order]):
     context_key = "order_by_number"
 
     def batch_load(self, keys):
@@ -65,7 +66,7 @@ class OrderByNumberLoader(DataLoader):
         return [orders.get(number) for number in keys]
 
 
-class OrdersByUserLoader(DataLoader):
+class OrdersByUserLoader(DataLoader[int, list[Order]]):
     context_key = "order_by_user"
 
     def batch_load(self, keys):
@@ -78,7 +79,7 @@ class OrdersByUserLoader(DataLoader):
         return [orders_by_user_map.get(user_id, []) for user_id in keys]
 
 
-class OrderLineByIdLoader(DataLoader):
+class OrderLineByIdLoader(DataLoader[UUID, OrderLine]):
     context_key = "orderline_by_id"
 
     def batch_load(self, keys):
@@ -88,7 +89,7 @@ class OrderLineByIdLoader(DataLoader):
         return [order_lines.get(line_id) for line_id in keys]
 
 
-class OrderLinesByOrderIdLoader(DataLoader):
+class OrderLinesByOrderIdLoader(DataLoader[UUID, list[OrderLine]]):
     context_key = "orderlines_by_order"
 
     def batch_load(self, keys):
@@ -98,12 +99,12 @@ class OrderLinesByOrderIdLoader(DataLoader):
             .order_by("created_at")
         )
         line_map = defaultdict(list)
-        for line in lines.iterator():
+        for line in lines.iterator(chunk_size=1000):
             line_map[line.order_id].append(line)
         return [line_map.get(order_id, []) for order_id in keys]
 
 
-class OrderEventsByOrderIdLoader(DataLoader):
+class OrderEventsByOrderIdLoader(DataLoader[UUID, list[OrderEvent]]):
     context_key = "orderevents_by_order"
 
     def batch_load(self, keys):
@@ -113,12 +114,12 @@ class OrderEventsByOrderIdLoader(DataLoader):
             .order_by("pk")
         )
         events_map = defaultdict(list)
-        for event in events.iterator():
+        for event in events.iterator(chunk_size=1000):
             events_map[event.order_id].append(event)
         return [events_map.get(order_id, []) for order_id in keys]
 
 
-class OrderEventsByIdLoader(DataLoader):
+class OrderEventsByIdLoader(DataLoader[int, OrderEvent]):
     context_key = "orderevents_by_id"
 
     def batch_load(self, keys):
@@ -130,7 +131,7 @@ class OrderEventsByIdLoader(DataLoader):
         return [events.get(event_id) for event_id in keys]
 
 
-class OrderGrantedRefundsByOrderIdLoader(DataLoader):
+class OrderGrantedRefundsByOrderIdLoader(DataLoader[UUID, list[OrderGrantedRefund]]):
     context_key = "order_granted_refunds_by_order_id"
 
     def batch_load(self, keys):
@@ -139,12 +140,14 @@ class OrderGrantedRefundsByOrderIdLoader(DataLoader):
         ).filter(order_id__in=keys)
         refunds_map = defaultdict(list)
 
-        for refund in refunds.iterator():
+        for refund in refunds.iterator(chunk_size=1000):
             refunds_map[refund.order_id].append(refund)
         return [refunds_map.get(order_id, []) for order_id in keys]
 
 
-class OrderGrantedRefundLinesByOrderGrantedRefundIdLoader(DataLoader):
+class OrderGrantedRefundLinesByOrderGrantedRefundIdLoader(
+    DataLoader[int, list[OrderGrantedRefundLine]]
+):
     context_key = "order_granted_refund_lines_by_granted_refund_id"
 
     def batch_load(self, keys):
@@ -153,14 +156,14 @@ class OrderGrantedRefundLinesByOrderGrantedRefundIdLoader(DataLoader):
         ).filter(granted_refund_id__in=keys)
         refund_lines_map = defaultdict(list)
 
-        for refund_line in refund_lines.iterator():
+        for refund_line in refund_lines.iterator(chunk_size=1000):
             refund_lines_map[refund_line.granted_refund_id].append(refund_line)
         return [
             refund_lines_map.get(granted_refund_id, []) for granted_refund_id in keys
         ]
 
 
-class AllocationsByOrderLineIdLoader(DataLoader):
+class AllocationsByOrderLineIdLoader(DataLoader[UUID, list[Allocation]]):
     context_key = "allocations_by_orderline_id"
 
     def batch_load(self, keys):
@@ -175,7 +178,7 @@ class AllocationsByOrderLineIdLoader(DataLoader):
         return [order_lines_to_allocations[order_line_id] for order_line_id in keys]
 
 
-class FulfillmentsByOrderIdLoader(DataLoader):
+class FulfillmentsByOrderIdLoader(DataLoader[UUID, list[Fulfillment]]):
     context_key = "fulfillments_by_order"
 
     def batch_load(self, keys):
@@ -185,12 +188,12 @@ class FulfillmentsByOrderIdLoader(DataLoader):
             .order_by("pk")
         )
         fulfillments_map = defaultdict(list)
-        for fulfillment in fulfillments.iterator():
+        for fulfillment in fulfillments.iterator(chunk_size=1000):
             fulfillments_map[fulfillment.order_id].append(fulfillment)
         return [fulfillments_map.get(order_id, []) for order_id in keys]
 
 
-class FulfillmentLinesByIdLoader(DataLoader):
+class FulfillmentLinesByIdLoader(DataLoader[int, FulfillmentLine]):
     context_key = "fulfillment_lines_by_id"
 
     def batch_load(self, keys):
@@ -200,7 +203,7 @@ class FulfillmentLinesByIdLoader(DataLoader):
         return [fulfillment_lines.get(line_id) for line_id in keys]
 
 
-class FulfillmentLinesByFulfillmentIdLoader(DataLoader):
+class FulfillmentLinesByFulfillmentIdLoader(DataLoader[int, list[FulfillmentLine]]):
     context_key = "fulfillment_lines_by_fulfillment_id"
 
     def batch_load(self, keys):
@@ -221,7 +224,7 @@ class FulfillmentLinesByFulfillmentIdLoader(DataLoader):
         ]
 
 
-class TransactionItemsByOrderIDLoader(DataLoader):
+class TransactionItemsByOrderIDLoader(DataLoader[UUID, list[TransactionItem]]):
     context_key = "transaction_items_by_order_id"
 
     def batch_load(self, keys):
@@ -236,7 +239,9 @@ class TransactionItemsByOrderIDLoader(DataLoader):
         return [transactions_map.get(order_id, []) for order_id in keys]
 
 
-class TransactionEventsByOrderGrantedRefundIdLoader(DataLoader):
+class TransactionEventsByOrderGrantedRefundIdLoader(
+    DataLoader[int, list[TransactionEvent]]
+):
     context_key = "transaction_event_by_order_granted_refund_id"
 
     def batch_load(self, keys):

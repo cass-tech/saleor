@@ -1,13 +1,10 @@
-from typing import Optional
-
 from .....core.tracing import traced_atomic_transaction
 from .....discount.error_codes import DiscountErrorCode
 from .....discount.models import Promotion, PromotionRule
 from .....permission.enums import DiscountPermissions
 from .....webhook.event_types import WebhookEventAsyncType
-from ....channel import ChannelContext
 from ....core import ResolveInfo
-from ....core.descriptions import DEPRECATED_IN_3X_MUTATION
+from ....core.context import ChannelContext
 from ....core.doc_category import DOC_CATEGORY_DISCOUNTS
 from ....core.types import DiscountError
 from ....core.utils import (
@@ -26,11 +23,7 @@ from .sale_base_catalogue import SaleBaseCatalogueMutation
 
 class SaleAddCatalogues(SaleBaseCatalogueMutation):
     class Meta:
-        description = (
-            "Adds products, categories, collections to a sale."
-            + DEPRECATED_IN_3X_MUTATION
-            + " Use `promotionRuleCreate` mutation instead."
-        )
+        description = "Adds products, categories, collections to a sale."
         doc_category = DOC_CATEGORY_DISCOUNTS
         permissions = (DiscountPermissions.MANAGE_DISCOUNTS,)
         error_type_class = DiscountError
@@ -89,7 +82,7 @@ class SaleAddCatalogues(SaleBaseCatalogueMutation):
     @classmethod
     def add_items_to_catalogue(
         cls, rules: list[PromotionRule], previous_catalogue_info: CatalogueInfo, input
-    ) -> Optional[dict]:
+    ) -> dict | None:
         catalogue_info_to_add = cls.get_catalogue_info_from_input(input)
         if any(catalogue_info_to_add):
             new_catalogue = merge_catalogues_info(

@@ -1,8 +1,7 @@
+import datetime
 from collections import defaultdict
-from datetime import datetime
 
 import graphene
-import pytz
 from django.core.exceptions import ValidationError
 from django.core.files import File
 from django.db.models import F
@@ -15,7 +14,7 @@ from ....core.tracing import traced_atomic_transaction
 from ....core.utils import prepare_unique_slug
 from ....core.utils.editorjs import clean_editor_js
 from ....core.utils.validators import get_oembed_data
-from ....discount.utils import mark_active_catalogue_promotion_rules_as_dirty
+from ....discount.utils.promotion import mark_active_catalogue_promotion_rules_as_dirty
 from ....permission.enums import ProductPermissions
 from ....product import ProductMediaTypes, models
 from ....product.error_codes import ProductBulkCreateErrorCode
@@ -25,14 +24,14 @@ from ....warehouse.models import Warehouse
 from ....webhook.event_types import WebhookEventAsyncType
 from ....webhook.utils import get_webhooks_for_event
 from ...attribute.types import AttributeValueInput
-from ...attribute.utils import ProductAttributeAssignmentMixin
-from ...channel import ChannelContext
-from ...core.descriptions import ADDED_IN_313, PREVIEW_FEATURE, RICH_CONTENT
+from ...attribute.utils.attribute_assignment import AttributeAssignmentMixin
+from ...core.context import ChannelContext
+from ...core.descriptions import RICH_CONTENT
 from ...core.doc_category import DOC_CATEGORY_PRODUCTS
 from ...core.enums import ErrorPolicyEnum
 from ...core.fields import JSONString
-from ...core.mutations import BaseMutation, ModelMutation
-from ...core.scalars import WeightScalar
+from ...core.mutations import BaseMutation, DeprecatedModelMutation
+from ...core.scalars import DateTime, WeightScalar
 from ...core.types import (
     BaseInputObjectType,
     BaseObjectType,
@@ -44,7 +43,7 @@ from ...core.types import (
 from ...core.utils import get_duplicated_values
 from ...core.validators import clean_seo_fields
 from ...core.validators.file import clean_image_file, is_image_url, validate_image_url
-from ...meta.inputs import MetadataInput
+from ...meta.inputs import MetadataInput, MetadataInputDescription
 from ...plugins.dataloaders import get_plugin_manager_promise
 from ..mutations.product.product_create import ProductCreateInput
 from ..types import Product
@@ -77,9 +76,7 @@ class ProductChannelListingCreateInput(BaseInputObjectType):
     is_published = graphene.Boolean(
         description="Determines if object is visible to customers."
     )
-    published_at = graphene.types.datetime.DateTime(
-        description="Publication date time. ISO 8601 standard."
-    )
+    published_at = DateTime(description="Publication date time. ISO 8601 standard.")
     visible_in_listings = graphene.Boolean(
         description=(
             "Determines if product is visible in product listings "
@@ -93,7 +90,7 @@ class ProductChannelListingCreateInput(BaseInputObjectType):
             "this product is still visible to customers, but it cannot be purchased."
         ),
     )
-    available_for_purchase_at = graphene.DateTime(
+    available_for_purchase_at = DateTime(
         description=(
             "A start date time from which a product will be available "
             "for purchase. When not set and `isAvailable` is set to True, "
@@ -140,12 +137,14 @@ class ProductBulkCreateInput(ProductCreateInput):
     rating = graphene.Float(description="Defines the product rating value.")
     metadata = NonNullList(
         MetadataInput,
-        description="Fields required to update the product metadata.",
+        description="Fields required to update the product metadata. "
+        f"{MetadataInputDescription.PUBLIC_METADATA_INPUT}",
         required=False,
     )
     private_metadata = NonNullList(
         MetadataInput,
-        description=("Fields required to update the product private metadata."),
+        description="Fields required to update the product private metadata. "
+        f"{MetadataInputDescription.PRIVATE_METADATA_INPUT}",
         required=False,
     )
     external_reference = graphene.String(
@@ -201,7 +200,7 @@ class ProductBulkCreate(BaseMutation):
         )
 
     class Meta:
-        description = "Creates products." + ADDED_IN_313 + PREVIEW_FEATURE
+        description = "Creates products."
         doc_category = DOC_CATEGORY_PRODUCTS
         permissions = (ProductPermissions.MANAGE_PRODUCTS,)
         error_type_class = ProductBulkCreateError
@@ -290,7 +289,7 @@ class ProductBulkCreate(BaseMutation):
         if attributes := cleaned_input.get("attributes"):
             try:
                 attributes_qs = cleaned_input["product_type"].product_attributes.all()
-                attributes = ProductAttributeAssignmentMixin.clean_input(
+                attributes = AttributeAssignmentMixin.clean_input(
                     attributes, attributes_qs
                 )
                 cleaned_input["attributes"] = attributes
@@ -353,14 +352,16 @@ class ProductBulkCreate(BaseMutation):
         if is_available_for_purchase is False:
             channel_data["available_for_purchase_at"] = None
         elif is_available_for_purchase is True and not available_for_purchase_at:
-            channel_data["available_for_purchase_at"] = datetime.now(pytz.UTC)
+            channel_data["available_for_purchase_at"] = datetime.datetime.now(
+                tz=datetime.UTC
+            )
         else:
             channel_data["available_for_purchase_at"] = available_for_purchase_at
 
     @staticmethod
     def set_published_at(channel_data):
         if channel_data.get("is_published") and not channel_data.get("published_at"):
-            channel_data["published_at"] = datetime.now(pytz.UTC)
+            channel_data["published_at"] = datetime.datetime.now(tz=datetime.UTC)
 
     @classmethod
     def clean_product_channel_listings(
@@ -546,7 +547,7 @@ class ProductBulkCreate(BaseMutation):
         base_fields_errors_count = 0
 
         try:
-            cleaned_input = ModelMutation.clean_input(
+            cleaned_input = DeprecatedModelMutation.clean_input(
                 info, None, data, input_cls=ProductBulkCreateInput
             )
         except ValidationError as exc:
@@ -644,13 +645,23 @@ class ProductBulkCreate(BaseMutation):
                 )
                 continue
             try:
-                metadata_list = cleaned_input.pop("metadata", None)
-                private_metadata_list = cleaned_input.pop("private_metadata", None)
+                metadata_list: list[MetadataInput] = cleaned_input.pop("metadata", None)
+                private_metadata_list: list[MetadataInput] = cleaned_input.pop(
+                    "private_metadata", None
+                )
+
+                metadata_collection = cls.create_metadata_from_graphql_input(
+                    metadata_list, error_field_name="metadata"
+                )
+                private_metadata_collection = cls.create_metadata_from_graphql_input(
+                    private_metadata_list,
+                    error_field_name="private_metadata",
+                )
 
                 instance = models.Product()
                 instance = cls.construct_instance(instance, cleaned_input)
                 cls.validate_and_update_metadata(
-                    instance, metadata_list, private_metadata_list
+                    instance, metadata_collection, private_metadata_collection
                 )
                 cls.clean_instance(info, instance)
                 instance.search_index_dirty = True
@@ -699,16 +710,31 @@ class ProductBulkCreate(BaseMutation):
     def create_variants(cls, info, product, variants_inputs, index, index_error_map):
         variants_instances_data = []
 
-        for variant_index, variant_data in enumerate(variants_inputs):
+        for variant_data in variants_inputs:
             if variant_data:
                 try:
-                    metadata_list = variant_data.pop("metadata", None)
-                    private_metadata_list = variant_data.pop("private_metadata", None)
+                    metadata_list: list[MetadataInput] = variant_data.pop(
+                        "metadata", None
+                    )
+                    private_metadata_list: list[MetadataInput] = variant_data.pop(
+                        "private_metadata", None
+                    )
+
+                    metadata_collection = cls.create_metadata_from_graphql_input(
+                        metadata_list, error_field_name="metadata"
+                    )
+                    private_metadata_collection = (
+                        cls.create_metadata_from_graphql_input(
+                            private_metadata_list,
+                            error_field_name="private_metadata",
+                        )
+                    )
+
                     variant = models.ProductVariant()
                     variant.product = product
                     variant = cls.construct_instance(variant, variant_data)
                     cls.validate_and_update_metadata(
-                        variant, metadata_list, private_metadata_list
+                        variant, metadata_collection, private_metadata_collection
                     )
                     variant.full_clean(exclude=["product"])
 
@@ -770,7 +796,7 @@ class ProductBulkCreate(BaseMutation):
         models.ProductChannelListing.objects.bulk_create(listings_to_create)
 
         for product, attributes in attributes_to_save:
-            ProductAttributeAssignmentMixin.save(product, attributes)
+            AttributeAssignmentMixin.save(product, attributes)
 
         if variants_input_data:
             variants = cls.save_variants(info, variants_input_data)
@@ -880,7 +906,7 @@ class ProductBulkCreate(BaseMutation):
             cls.call_event(manager.product_variant_created, variant, webhooks=webhooks)
 
         if products:
-            channel_ids = set([channel.id for channel in channels])
+            channel_ids = {channel.id for channel in channels}
             cls.call_event(mark_active_catalogue_promotion_rules_as_dirty, channel_ids)
 
     @classmethod
@@ -896,7 +922,7 @@ class ProductBulkCreate(BaseMutation):
         )
 
         # check error policy
-        if any([True if error else False for error in index_error_map.values()]):
+        if any(index_error_map.values()):
             if error_policy == ErrorPolicyEnum.REJECT_EVERYTHING.value:
                 results = get_results(instances_data_with_errors_list, True)
                 return ProductBulkCreate(count=0, results=results)

@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from typing import Union, cast
+from typing import cast
 from uuid import uuid4
 
 from django.contrib.auth.hashers import make_password
@@ -11,7 +11,12 @@ from ..core.models import Job, ModelWithMetadata
 from ..permission.enums import AppPermission, BasePermissionEnum
 from ..permission.models import Permission
 from ..webhook.event_types import WebhookEventAsyncType, WebhookEventSyncType
-from .types import AppExtensionMount, AppExtensionTarget, AppType
+from .types import (
+    AppExtensionHttpMethod,
+    AppExtensionMount,
+    AppExtensionTarget,
+    AppType,
+)
 
 
 class AppQueryset(models.QuerySet["App"]):
@@ -30,6 +35,12 @@ class AppQueryset(models.QuerySet["App"]):
             webhooks__events__event_type=event_type,
             **permissions,
         )
+
+    def not_removed(self):
+        return self.filter(removed_at__isnull=True)
+
+    def marked_to_be_removed(self):
+        return self.filter(removed_at__isnull=False)
 
 
 AppManager = models.Manager.from_queryset(AppQueryset)
@@ -96,7 +107,7 @@ class App(ModelWithMetadata):
             setattr(self, perm_cache_name, {f"{ct}.{name}" for ct, name in perms})
         return getattr(self, perm_cache_name)
 
-    def has_perms(self, perm_list: Iterable[Union[BasePermissionEnum, str]]) -> bool:
+    def has_perms(self, perm_list: Iterable[BasePermissionEnum | str]) -> bool:
         """Return True if the app has each of the specified permissions."""
         if not self.is_active:
             return False
@@ -109,7 +120,7 @@ class App(ModelWithMetadata):
 
         return (wanted_perms & actual_perms) == wanted_perms
 
-    def has_perm(self, perm: Union[BasePermissionEnum, str]) -> bool:
+    def has_perm(self, perm: BasePermissionEnum | str) -> bool:
         """Return True if the app has the specified permission."""
         if not self.is_active:
             return False
@@ -119,7 +130,7 @@ class App(ModelWithMetadata):
 
 
 class AppTokenManager(models.Manager["AppToken"]):
-    def create(self, app, name="", auth_token=None, **extra_fields):
+    def create(self, *, app, name="", auth_token=None, **extra_fields):  # type: ignore[override]
         """Create an app token with the given name."""
         if not auth_token:
             auth_token = generate_token()
@@ -127,11 +138,6 @@ class AppTokenManager(models.Manager["AppToken"]):
         app_token.set_auth_token(auth_token)
         app_token.save()
         return app_token, auth_token
-
-    def create_with_token(self, *args, **kwargs) -> tuple["AppToken", str]:
-        # As `create` is waiting to be fixed, I'm using this proper method from future
-        # to get both AppToken and auth_token.
-        return self.create(*args, **kwargs)
 
 
 class AppToken(models.Model):
@@ -161,6 +167,11 @@ class AppExtension(models.Model):
         Permission,
         blank=True,
         help_text="Specific permissions for this app extension.",
+    )
+    http_target_method = models.CharField(
+        blank=False,
+        null=True,
+        choices=AppExtensionHttpMethod.CHOICES,
     )
 
 

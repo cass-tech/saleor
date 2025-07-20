@@ -1,5 +1,3 @@
-from typing import Optional
-
 import graphene
 from django.core.exceptions import ValidationError
 
@@ -11,6 +9,7 @@ from ....order.error_codes import OrderErrorCode
 from ....permission.enums import OrderPermissions
 from ...app.dataloaders import get_app_promise
 from ...core import ResolveInfo
+from ...core.context import SyncWebhookControlContext
 from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.mutations import BaseMutation
 from ...core.types import OrderError
@@ -18,7 +17,7 @@ from ...plugins.dataloaders import get_plugin_manager_promise
 from ..types import Order
 
 
-def clean_order_cancel(order: Optional[models.Order]) -> models.Order:
+def clean_order_cancel(order: models.Order | None) -> models.Order:
     if not order or not order.can_cancel():
         raise ValidationError(
             {
@@ -62,4 +61,4 @@ class OrderCancel(BaseMutation):
                 manager=manager,
             )
             deactivate_order_gift_cards(order.id, user, app)
-        return OrderCancel(order=order)
+        return OrderCancel(order=SyncWebhookControlContext(order))

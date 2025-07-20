@@ -1,5 +1,4 @@
-from datetime import timedelta
-from typing import Optional
+import datetime
 
 from django.core.exceptions import ValidationError
 
@@ -9,7 +8,7 @@ from ...core.enums import ChannelErrorCode
 DELETE_EXPIRED_ORDERS_MAX_DAYS = 120
 
 
-def clean_expire_orders_after(expire_orders_after: int) -> Optional[int]:
+def clean_expire_orders_after(expire_orders_after: int) -> int | None:
     if expire_orders_after is None or expire_orders_after == 0:
         return None
     if expire_orders_after < 0:
@@ -24,7 +23,9 @@ def clean_expire_orders_after(expire_orders_after: int) -> Optional[int]:
     return expire_orders_after
 
 
-def clean_delete_expired_orders_after(delete_expired_orders_after: int) -> timedelta:
+def clean_delete_expired_orders_after(
+    delete_expired_orders_after: int,
+) -> datetime.timedelta:
     if (
         delete_expired_orders_after < 1
         or delete_expired_orders_after > DELETE_EXPIRED_ORDERS_MAX_DAYS
@@ -38,7 +39,22 @@ def clean_delete_expired_orders_after(delete_expired_orders_after: int) -> timed
                 )
             }
         )
-    return timedelta(days=delete_expired_orders_after)
+    return datetime.timedelta(days=delete_expired_orders_after)
+
+
+def clean_checkout_ttl_before_releasing_funds(
+    checkout_ttl_before_releasing_funds: int,
+) -> datetime.timedelta:
+    if checkout_ttl_before_releasing_funds <= 0:
+        raise ValidationError(
+            {
+                "checkout_ttl_before_releasing_funds": ValidationError(
+                    "The time in hours after which funds for expired checkouts will be released must be greater than 0.",
+                    code=ChannelErrorCode.INVALID.value,
+                )
+            }
+        )
+    return datetime.timedelta(hours=checkout_ttl_before_releasing_funds)
 
 
 def clean_input_order_settings(
@@ -76,12 +92,29 @@ def clean_input_order_settings(
         instance.include_draft_order_in_voucher_usage
     )
 
+    if "draft_order_line_price_freeze_period" in order_settings:
+        cleaned_input["draft_order_line_price_freeze_period"] = order_settings[
+            "draft_order_line_price_freeze_period"
+        ]
+
+    # For newly created channels, by default use new discount propagation flow
+    if instance.pk is None:
+        cleaned_input["use_legacy_line_discount_propagation_for_order"] = False
+
+    if order_settings.get("use_legacy_line_discount_propagation") is not None:
+        cleaned_input["use_legacy_line_discount_propagation_for_order"] = (
+            order_settings["use_legacy_line_discount_propagation"]
+        )
+
 
 def clean_input_checkout_settings(checkout_settings: dict, cleaned_input: dict):
-    if "use_legacy_error_flow" in checkout_settings:
-        cleaned_input["use_legacy_error_flow_for_checkout"] = checkout_settings[
-            "use_legacy_error_flow"
-        ]
+    input_to_model_fields = {
+        "use_legacy_error_flow": "use_legacy_error_flow_for_checkout",
+        "automatically_complete_fully_paid_checkouts": "automatically_complete_fully_paid_checkouts",
+    }
+    for input_field, model_field in input_to_model_fields.items():
+        if input_field in checkout_settings:
+            cleaned_input[model_field] = checkout_settings[input_field]
 
 
 def clean_input_payment_settings(payment_settings: dict, cleaned_input: dict):
@@ -90,4 +123,31 @@ def clean_input_payment_settings(payment_settings: dict, cleaned_input: dict):
     ):
         cleaned_input["default_transaction_flow_strategy"] = (
             default_transaction_strategy
+        )
+    if (
+        release_funds_for_expired_checkouts := payment_settings.get(
+            "release_funds_for_expired_checkouts"
+        )
+    ) is not None:
+        cleaned_input["release_funds_for_expired_checkouts"] = (
+            release_funds_for_expired_checkouts
+        )
+
+    if (
+        checkout_ttl_before_releasing_funds := payment_settings.get(
+            "checkout_ttl_before_releasing_funds"
+        )
+    ) is not None:
+        cleaned_input["checkout_ttl_before_releasing_funds"] = (
+            clean_checkout_ttl_before_releasing_funds(
+                checkout_ttl_before_releasing_funds
+            )
+        )
+
+    if "checkout_release_funds_cut_off_date" in payment_settings:
+        checkout_release_funds_cut_off_date = payment_settings[
+            "checkout_release_funds_cut_off_date"
+        ]
+        cleaned_input["checkout_release_funds_cut_off_date"] = (
+            checkout_release_funds_cut_off_date
         )

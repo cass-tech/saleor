@@ -1,5 +1,5 @@
+import datetime
 import json
-from datetime import timedelta
 from unittest import mock
 
 import graphene
@@ -47,12 +47,18 @@ CHANNEL_CREATE_MUTATION = """
                     deleteExpiredOrdersAfter
                     allowUnpaidOrders
                     includeDraftOrderInVoucherUsage
+                    draftOrderLinePriceFreezePeriod
+                    useLegacyLineDiscountPropagation
                 }
                 checkoutSettings {
                     useLegacyErrorFlow
+                    automaticallyCompleteFullyPaidCheckouts
                 }
                 paymentSettings {
                     defaultTransactionFlowStrategy
+                    releaseFundsForExpiredCheckouts
+                    checkoutTtlBeforeReleasingFunds
+                    checkoutReleaseFundsCutOffDate
                 }
             }
             errors{
@@ -87,6 +93,7 @@ def test_channel_create_mutation_as_staff_user(
                 "automaticallyFulfillNonShippableGiftCard": False,
                 "expireOrdersAfter": 10,
                 "includeDraftOrderInVoucherUsage": True,
+                "draftOrderLinePriceFreezePeriod": 10,
             },
             "checkoutSettings": {"useLegacyErrorFlow": False},
         }
@@ -121,7 +128,12 @@ def test_channel_create_mutation_as_staff_user(
     )
     assert channel_data["orderSettings"]["expireOrdersAfter"] == 10
     assert channel_data["orderSettings"]["includeDraftOrderInVoucherUsage"] is True
+    assert channel_data["orderSettings"]["draftOrderLinePriceFreezePeriod"] == 10
     assert channel_data["checkoutSettings"]["useLegacyErrorFlow"] is False
+    assert (
+        channel_data["checkoutSettings"]["automaticallyCompleteFullyPaidCheckouts"]
+        is False
+    )
 
 
 def test_channel_create_mutation_as_app(
@@ -139,7 +151,10 @@ def test_channel_create_mutation_as_app(
             "slug": slug,
             "currencyCode": currency_code,
             "defaultCountry": default_country,
-            "checkoutSettings": {"useLegacyErrorFlow": False},
+            "checkoutSettings": {
+                "useLegacyErrorFlow": False,
+                "automaticallyCompleteFullyPaidCheckouts": True,
+            },
         }
     }
 
@@ -175,7 +190,12 @@ def test_channel_create_mutation_as_app(
     )
     assert channel_data["orderSettings"]["expireOrdersAfter"] is None
     assert channel_data["orderSettings"]["includeDraftOrderInVoucherUsage"] is False
+    assert channel_data["orderSettings"]["draftOrderLinePriceFreezePeriod"] == 24
     assert channel_data["checkoutSettings"]["useLegacyErrorFlow"] is False
+    assert (
+        channel_data["checkoutSettings"]["automaticallyCompleteFullyPaidCheckouts"]
+        is True
+    )
 
 
 def test_channel_create_mutation_as_customer(user_api_client):
@@ -244,6 +264,43 @@ def test_channel_create_mutation_negative_expire_orders(
     content = get_graphql_content(response)
     error = content["data"]["channelCreate"]["errors"][0]
     assert error["field"] == "expireOrdersAfter"
+    assert error["code"] == ChannelErrorCode.INVALID.name
+
+
+def test_channel_create_draft_order_line_price_freeze_period_negative_value(
+    permission_manage_channels,
+    app_api_client,
+):
+    # given
+    name = "testName"
+    slug = "test_slug"
+    currency_code = "USD"
+    default_country = "US"
+    allocation_strategy = AllocationStrategyEnum.PRIORITIZE_SORTING_ORDER.name
+    variables = {
+        "input": {
+            "name": name,
+            "slug": slug,
+            "currencyCode": currency_code,
+            "defaultCountry": default_country,
+            "stockSettings": {"allocationStrategy": allocation_strategy},
+            "orderSettings": {
+                "draftOrderLinePriceFreezePeriod": -1,
+            },
+        }
+    }
+
+    # when
+    response = app_api_client.post_graphql(
+        CHANNEL_CREATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+
+    # then
+    content = get_graphql_content(response)
+    error = content["data"]["channelCreate"]["errors"][0]
+    assert error["field"] == "draftOrderLinePriceFreezePeriod"
     assert error["code"] == ChannelErrorCode.INVALID.name
 
 
@@ -655,6 +712,100 @@ def test_channel_create_set_default_transaction_flow_strategy(
     )
 
 
+def test_channel_create_set_checkout_release_settings(
+    permission_manage_channels,
+    staff_api_client,
+):
+    # given
+    name = "testName"
+    slug = "test_slug"
+    currency_code = "USD"
+    default_country = "US"
+
+    date = datetime.datetime(2022, 5, 12, 0, 0, 0, tzinfo=datetime.UTC)
+    ttl_before_releasing_funds = 7
+    variables = {
+        "input": {
+            "name": name,
+            "slug": slug,
+            "currencyCode": currency_code,
+            "defaultCountry": default_country,
+            "paymentSettings": {
+                "releaseFundsForExpiredCheckouts": False,
+                "checkoutTtlBeforeReleasingFunds": ttl_before_releasing_funds,
+                "checkoutReleaseFundsCutOffDate": date,
+            },
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_CREATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelCreate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    channel = Channel.objects.get()
+    assert not channel_data["paymentSettings"]["releaseFundsForExpiredCheckouts"]
+    assert (
+        channel_data["paymentSettings"]["checkoutTtlBeforeReleasingFunds"]
+        == ttl_before_releasing_funds
+    )
+    assert (
+        channel_data["paymentSettings"]["checkoutReleaseFundsCutOffDate"]
+        == "2022-05-12T00:00:00+00:00"
+    )
+
+    assert not channel.release_funds_for_expired_checkouts
+    assert channel.checkout_ttl_before_releasing_funds == datetime.timedelta(
+        hours=ttl_before_releasing_funds
+    )
+    assert channel.checkout_release_funds_cut_off_date == date
+
+
+def test_channel_create_set_incorect_checkout_ttl_before_releasing_funds(
+    permission_manage_channels,
+    staff_api_client,
+):
+    # given
+    name = "testName"
+    slug = "test_slug"
+    currency_code = "USD"
+    default_country = "US"
+
+    ttl_before_releasing_funds = 0
+    variables = {
+        "input": {
+            "name": name,
+            "slug": slug,
+            "currencyCode": currency_code,
+            "defaultCountry": default_country,
+            "paymentSettings": {
+                "checkoutTtlBeforeReleasingFunds": ttl_before_releasing_funds,
+            },
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_CREATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    errors = content["data"]["channelCreate"]["errors"]
+    assert len(errors) == 1
+    assert errors[0]["field"] == "checkoutTtlBeforeReleasingFunds"
+    assert errors[0]["code"] == ChannelErrorCode.INVALID.name
+
+
 def test_channel_create_set_delete_expired_orders_after(
     permission_manage_channels,
     staff_api_client,
@@ -692,7 +843,9 @@ def test_channel_create_set_delete_expired_orders_after(
         channel_data["orderSettings"]["deleteExpiredOrdersAfter"]
         == delete_expired_after
     )
-    assert channel.delete_expired_orders_after == timedelta(days=delete_expired_after)
+    assert channel.delete_expired_orders_after == datetime.timedelta(
+        days=delete_expired_after
+    )
 
 
 @pytest.mark.parametrize("delete_expired_after", [-1, 0, 121, 300])
@@ -764,9 +917,7 @@ def test_channel_create_set_checkout_use_legacy_error_flow(
     assert channel.use_legacy_error_flow_for_checkout is False
 
 
-@pytest.mark.parametrize("allowUnpaid", [True, False])
-def test_channel_create_set_allow_unpaid_orders(
-    allowUnpaid,
+def test_channel_create_set_automatically_complete_fully_paid_checkouts(
     permission_manage_channels,
     staff_api_client,
 ):
@@ -781,7 +932,7 @@ def test_channel_create_set_allow_unpaid_orders(
             "slug": slug,
             "currencyCode": currency_code,
             "defaultCountry": default_country,
-            "orderSettings": {"allowUnpaidOrders": allowUnpaid},
+            "checkoutSettings": {"automaticallyCompleteFullyPaidCheckouts": True},
         }
     }
 
@@ -798,5 +949,96 @@ def test_channel_create_set_allow_unpaid_orders(
     assert not data["errors"]
     channel_data = data["channel"]
     channel = Channel.objects.get()
-    assert channel_data["orderSettings"]["allowUnpaidOrders"] == allowUnpaid
-    assert channel.allow_unpaid_orders == allowUnpaid
+    assert (
+        channel_data["checkoutSettings"]["automaticallyCompleteFullyPaidCheckouts"]
+        is True
+    )
+    assert channel.automatically_complete_fully_paid_checkouts is True
+
+
+@pytest.mark.parametrize("allow_unpaid", [True, False])
+def test_channel_create_set_allow_unpaid_orders(
+    allow_unpaid,
+    permission_manage_channels,
+    staff_api_client,
+):
+    # given
+    name = "testName"
+    slug = "test_slug"
+    currency_code = "USD"
+    default_country = "US"
+    variables = {
+        "input": {
+            "name": name,
+            "slug": slug,
+            "currencyCode": currency_code,
+            "defaultCountry": default_country,
+            "orderSettings": {"allowUnpaidOrders": allow_unpaid},
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_CREATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelCreate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    channel = Channel.objects.get()
+    assert channel_data["orderSettings"]["allowUnpaidOrders"] == allow_unpaid
+    assert channel.allow_unpaid_orders == allow_unpaid
+
+
+@pytest.mark.parametrize(
+    ("use_legacy_input", "expected_result"),
+    [
+        ({"useLegacyLineDiscountPropagation": True}, True),
+        ({"useLegacyLineDiscountPropagation": False}, False),
+        (None, False),
+        ({"allowUnpaidOrders": False}, False),
+    ],
+)
+def test_channel_create_set_use_legacy_line_discount_propagation(
+    use_legacy_input,
+    expected_result,
+    permission_manage_channels,
+    staff_api_client,
+):
+    # given
+    name = "testName"
+    slug = "test_slug"
+    currency_code = "USD"
+    default_country = "US"
+    variables = {
+        "input": {
+            "name": name,
+            "slug": slug,
+            "currencyCode": currency_code,
+            "defaultCountry": default_country,
+            "orderSettings": use_legacy_input,
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_CREATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelCreate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    channel = Channel.objects.get()
+    assert (
+        channel_data["orderSettings"]["useLegacyLineDiscountPropagation"]
+        == expected_result
+    )
+    assert channel.use_legacy_line_discount_propagation_for_order == expected_result

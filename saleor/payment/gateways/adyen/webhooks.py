@@ -4,17 +4,16 @@ import hashlib
 import hmac
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from decimal import Decimal
 from json.decoder import JSONDecodeError
-from typing import Any, Callable, Optional, cast
+from typing import Any, cast
 from urllib.parse import urlencode, urlparse
 
 import Adyen
 import graphene
 from django.contrib.auth.hashers import check_password
 from django.core.exceptions import ValidationError
-from django.core.handlers.wsgi import WSGIRequest
 from django.forms.models import model_to_dict
 from django.http import (
     HttpResponse,
@@ -33,6 +32,7 @@ from ....checkout.models import Checkout
 from ....core.prices import quantize_price
 from ....core.transactions import transaction_with_commit_on_errors
 from ....core.utils.url import prepare_url
+from ....graphql.core import SaleorContext
 from ....graphql.core.utils import from_global_id_or_error
 from ....order.actions import (
     cancel_order,
@@ -65,8 +65,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_payment_id(
-    payment_id: Optional[str],
-    transaction_id: Optional[str] = None,
+    payment_id: str | None,
+    transaction_id: str | None = None,
 ):
     if payment_id is None or not payment_id.strip():
         logger.warning("Missing payment ID. Reference %s", transaction_id)
@@ -86,10 +86,10 @@ def get_payment_id(
 
 
 def get_payment(
-    payment_id: Optional[str],
-    transaction_id: Optional[str] = None,
+    payment_id: str | None,
+    transaction_id: str | None = None,
     check_if_active=True,
-) -> Optional[Payment]:
+) -> Payment | None:
     transaction_id = transaction_id or ""
     db_payment_id = get_payment_id(payment_id)
     if not db_payment_id:
@@ -112,7 +112,7 @@ def get_payment(
     return payment
 
 
-def get_checkout(payment_id: int) -> Optional[Checkout]:
+def get_checkout(payment_id: int) -> Checkout | None:
     # Lock checkout in the same way as in checkoutComplete
     return (
         Checkout.objects.select_for_update(of=("self",))
@@ -128,9 +128,9 @@ def get_checkout(payment_id: int) -> Optional[Checkout]:
 
 def get_transaction(
     payment: "Payment",
-    transaction_id: Optional[str],
+    transaction_id: str | None,
     kind: str,
-) -> Optional[Transaction]:
+) -> Transaction | None:
     transaction = payment.transactions.filter(kind=kind, token=transaction_id).last()
     return transaction
 
@@ -153,6 +153,12 @@ def create_new_transaction(notification, payment, kind):
         error="",
         raw_response=notification,
         psp_reference=transaction_id,
+        legacy_adyen_plugin_payment_method=notification.get("paymentMethod", "")
+        .strip()
+        .lower(),
+        legacy_adyen_plugin_result_code=notification.get("resultCode", "")
+        .strip()
+        .lower(),
     )
     return create_transaction(
         payment,
@@ -164,7 +170,7 @@ def create_new_transaction(notification, payment, kind):
 
 
 def create_payment_notification_for_order(
-    payment: Payment, success_msg: str, failed_msg: Optional[str], is_success: bool
+    payment: Payment, success_msg: str, failed_msg: str | None, is_success: bool
 ):
     if not payment.order:
         # Order is not assigned
@@ -213,7 +219,9 @@ def create_order(payment, checkout, manager):
         )
     except ValidationError as e:
         logger.info(
-            "Failed to create order from checkout %s.", checkout.pk, extra={"error": e}
+            "Failed to create order from checkout %s.",
+            checkout.pk,
+            extra={"error": str(e)},
         )
         return None
     # Refresh the payment to assign the newly created order
@@ -231,7 +239,7 @@ def handle_not_created_order(notification, payment, checkout, kind, manager):
         ChargeStatus.PARTIALLY_CHARGED,
         ChargeStatus.FULLY_CHARGED,
     }:
-        return
+        return None
 
     transaction = create_new_transaction(
         notification, payment, TransactionKind.ACTION_TO_CONFIRM
@@ -291,8 +299,8 @@ def handle_authorization(notification: dict[str, Any], gateway_config: GatewayCo
         notification_payment_amount = price_from_minor_unit(
             amount.get("value"), amount.get("currency")
         )
-    except TypeError as e:
-        logger.exception("Cannot convert amount from minor unit", extra={"error": e})
+    except TypeError:
+        logger.exception("Cannot convert amount from minor unit")
         return
 
     if notification_payment_amount < payment.total:
@@ -300,8 +308,9 @@ def handle_authorization(notification: dict[str, Any], gateway_config: GatewayCo
         # a partial payment so we create an order in separate webhook (order_closed)
         # after payment finished.
         logger.info(
-            f"This is a partial payment notification. We can't create an order. "
-            f"pspReference: {transaction_id}, payment_id: {payment.pk}"
+            "This is a partial payment notification. We can't create an order. pspReference: %s, paymentId: %x",
+            transaction_id,
+            payment.pk,
         )
         return
 
@@ -538,7 +547,7 @@ def handle_refund(notification: dict[str, Any], _gateway_config: GatewayConfig):
         )
 
 
-def _get_kind(transaction: Optional[Transaction]) -> str:
+def _get_kind(transaction: Transaction | None) -> str:
     if transaction:
         return transaction.kind
     # To proceed the refund we already need to have the capture status so we will use it
@@ -583,11 +592,11 @@ def handle_failed_refund(notification: dict[str, Any], gateway_config: GatewayCo
         # we don't know anything about refund so we have to skip the notification about
         # failed refund.
         return
-
     if refund_transaction.kind == TransactionKind.REFUND_FAILED:
         # The failed refund is already saved
         return
-    elif refund_transaction.kind == TransactionKind.REFUND_ONGOING:
+
+    if refund_transaction.kind == TransactionKind.REFUND_ONGOING:
         # create new failed transaction which will allows us to discover duplicated
         # notification
         create_new_transaction(notification, payment, TransactionKind.REFUND_FAILED)
@@ -671,12 +680,12 @@ def handle_order_opened(notification: dict[str, Any], gateway_config: GatewayCon
     # order has been created.
     #
     # In this case we just logging here that we received the webhook properly.
-    logger.info(f"First payment request as a partial payment. {notification}")
+    logger.info("First payment request as a partial payment. %s", notification)
 
 
 def get_or_create_adyen_partial_payments(
     notification: dict[str, Any], payment: Payment
-) -> Optional[list[Payment]]:
+) -> list[Payment] | None:
     """Store basic data about partial payments created by Adyen.
 
     This is a workaround for not supporting partial payments in Saleor. Adyen can
@@ -809,8 +818,9 @@ def handle_order_closed(notification: dict[str, Any], gateway_config: GatewayCon
     is_success = True if notification.get("success") == "true" else False
     psp_reference = notification.get("pspReference")
     logger.info(
-        f"Partial payment has been finished with result: {is_success}."
-        f"psp: {psp_reference}"
+        "Partial payment has been finished with result: %s. pspReference: %s",
+        is_success,
+        psp_reference,
     )
 
     if not is_success:
@@ -826,11 +836,11 @@ def handle_order_closed(notification: dict[str, Any], gateway_config: GatewayCon
 
     if not payment:
         # We don't know anything about that payment
-        logger.info(f"There is no payment with psp: {psp_reference}")
+        logger.info("There is no payment with pspReference: %s", psp_reference)
         return
 
     if payment.order:
-        logger.info(f"Order already created for payment: {payment.pk}")
+        logger.info("Order already created for payment: %s", payment.pk)
         return
 
     adyen_partial_payments = get_or_create_adyen_partial_payments(notification, payment)
@@ -855,8 +865,8 @@ def handle_order_closed(notification: dict[str, Any], gateway_config: GatewayCon
             kind,
             get_plugins_manager(allow_replica=False),
         )
-    except Exception as e:
-        logger.exception("Exception during order creation", extra={"error": e})
+    except Exception:
+        logger.exception("Exception during order creation")
         return
     finally:
         if not order and adyen_partial_payments:
@@ -907,10 +917,10 @@ EVENT_MAP = {
 def validate_hmac_signature(
     notification: dict[str, Any], gateway_config: "GatewayConfig"
 ) -> bool:
-    hmac_signature: Optional[str] = notification.get("additionalData", {}).get(
+    hmac_signature: str | None = notification.get("additionalData", {}).get(
         "hmacSignature"
     )
-    hmac_key: Optional[str] = gateway_config.connection_params.get("webhook_hmac")
+    hmac_key: str | None = gateway_config.connection_params.get("webhook_hmac")
     if not hmac_key:
         return not hmac_signature
 
@@ -944,15 +954,15 @@ def validate_hmac_signature(
 def validate_auth_user(headers: HttpHeaders, gateway_config: "GatewayConfig") -> bool:
     username = gateway_config.connection_params["webhook_user"]
     password = gateway_config.connection_params["webhook_user_password"]
-    auth_header: Optional[str] = headers.get("Authorization")
-    if not auth_header and not username:
-        return True
-    if auth_header and not username:
+    auth_header: str | None = headers.get("Authorization")
+    if not auth_header:
+        if not username:
+            return True
         return False
-    if not auth_header and username:
+    if not username:
         return False
 
-    split_auth = auth_header.split(maxsplit=1)  # type: ignore
+    split_auth = auth_header.split(maxsplit=1)
     prefix = "BASIC"
 
     if len(split_auth) != 2 or split_auth[0].upper() != prefix:
@@ -980,7 +990,7 @@ def validate_merchant_account(
 
 
 @transaction_with_commit_on_errors()
-def handle_webhook(request: WSGIRequest, gateway_config: "GatewayConfig"):
+def handle_webhook(request: SaleorContext, gateway_config: "GatewayConfig"):
     try:
         json_data = json.loads(request.body)
     except JSONDecodeError:
@@ -1016,7 +1026,7 @@ class HttpResponseRedirectWithTrustedProtocol(HttpResponseRedirect):
 
 @transaction_with_commit_on_errors()
 def handle_additional_actions(
-    request: WSGIRequest, payment_details: Callable, channel_slug: str
+    request: SaleorContext, payment_details: Callable, channel_slug: str
 ):
     """Handle redirect with additional actions.
 
@@ -1085,18 +1095,18 @@ def handle_additional_actions(
     return HttpResponseRedirectWithTrustedProtocol(redirect_url)
 
 
-def prepare_api_request_data(request: WSGIRequest, data: dict):
+def prepare_api_request_data(request: SaleorContext, data: dict):
     if "parameters" not in data or "payment_data" not in data:
         raise KeyError(
             "Cannot perform payment. Lack of payment data and parameters information."
         )
 
     params = data["parameters"]
-    request_data: "QueryDict" = QueryDict("")
+    request_data: QueryDict = QueryDict("")
 
-    if all([param in request.GET for param in params]):
+    if all(param in request.GET for param in params):
         request_data = request.GET
-    elif all([param in request.POST for param in params]):
+    elif all(param in request.POST for param in params):
         request_data = request.POST
 
     if not request_data:
@@ -1131,7 +1141,7 @@ def prepare_redirect_url(
 
 def handle_api_response(
     payment: Payment,
-    checkout: Optional[Checkout],
+    checkout: Checkout | None,
     response: Adyen.Adyen,
     channel_slug: str,
 ):
@@ -1164,6 +1174,12 @@ def handle_api_response(
         raw_response=response.message,
         action_required_data=response.message.get("action"),
         psp_reference=response.message.get("pspReference", ""),
+        legacy_adyen_plugin_payment_method=response.message.get("paymentMethod", "")
+        .strip()
+        .lower(),
+        legacy_adyen_plugin_result_code=response.message.get("resultCode", "")
+        .strip()
+        .lower(),
     )
 
     create_transaction(

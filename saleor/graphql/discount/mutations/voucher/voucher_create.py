@@ -7,22 +7,23 @@ from .....discount import models
 from .....discount.error_codes import DiscountErrorCode
 from .....permission.enums import DiscountPermissions
 from .....webhook.event_types import WebhookEventAsyncType
-from ....channel import ChannelContext
 from ....core import ResolveInfo
+from ....core.context import ChannelContext
 from ....core.descriptions import (
-    ADDED_IN_31,
     ADDED_IN_318,
-    DEPRECATED_IN_3X_FIELD,
+    DEPRECATED_IN_3X_INPUT,
     PREVIEW_FEATURE,
 )
 from ....core.doc_category import DOC_CATEGORY_DISCOUNTS
-from ....core.mutations import ModelMutation
+from ....core.mutations import DeprecatedModelMutation
+from ....core.scalars import DateTime
 from ....core.types import BaseInputObjectType, DiscountError, NonNullList
 from ....core.utils import WebhookEventInfo, get_duplicated_values
 from ....core.validators import (
     validate_end_is_after_start,
     validate_one_of_args_is_in_mutation,
 )
+from ....meta.inputs import MetadataInput
 from ....plugins.dataloaders import get_plugin_manager_promise
 from ...enums import DiscountValueTypeEnum, VoucherTypeEnum
 from ...types import Voucher
@@ -36,7 +37,7 @@ class VoucherInput(BaseInputObjectType):
     code = graphene.String(
         required=False,
         description="Code to use the voucher. "
-        + DEPRECATED_IN_3X_FIELD
+        + DEPRECATED_IN_3X_INPUT
         + " Use `addCodes` instead.",
     )
     add_codes = NonNullList(
@@ -44,12 +45,8 @@ class VoucherInput(BaseInputObjectType):
         required=False,
         description="List of codes to add." + ADDED_IN_318 + PREVIEW_FEATURE,
     )
-    start_date = graphene.types.datetime.DateTime(
-        description="Start date of the voucher in ISO 8601 format."
-    )
-    end_date = graphene.types.datetime.DateTime(
-        description="End date of the voucher in ISO 8601 format."
-    )
+    start_date = DateTime(description="Start date of the voucher in ISO 8601 format.")
+    end_date = DateTime(description="End date of the voucher in ISO 8601 format.")
     discount_value_type = DiscountValueTypeEnum(
         description="Choices: fixed or percentage."
     )
@@ -58,7 +55,7 @@ class VoucherInput(BaseInputObjectType):
     )
     variants = NonNullList(
         graphene.ID,
-        description="Variants discounted by the voucher." + ADDED_IN_31,
+        description="Variants discounted by the voucher.",
         name="variants",
     )
     collections = NonNullList(
@@ -103,7 +100,7 @@ class VoucherInput(BaseInputObjectType):
         doc_category = DOC_CATEGORY_DISCOUNTS
 
 
-class VoucherCreate(ModelMutation):
+class VoucherCreate(DeprecatedModelMutation):
     class Arguments:
         input = VoucherInput(
             required=True, description="Fields required to create a voucher."
@@ -241,9 +238,9 @@ class VoucherCreate(ModelMutation):
 
         try:
             validate_end_is_after_start(start_date, end_date)
-        except ValidationError as error:
-            error.code = DiscountErrorCode.INVALID.value
-            raise ValidationError({"end_date": error})
+        except ValidationError as e:
+            e.code = DiscountErrorCode.INVALID.value
+            raise ValidationError({"end_date": e}) from e
 
     @classmethod
     def clean_codes_instance(cls, code_instances):
@@ -283,8 +280,18 @@ class VoucherCreate(ModelMutation):
         data = data.get("input")
         cleaned_input = cls.clean_input(info, voucher_instance, data)
 
-        metadata_list = cleaned_input.pop("metadata", None)
-        private_metadata_list = cleaned_input.pop("private_metadata", None)
+        metadata_list: list[MetadataInput] = cleaned_input.pop("metadata", None)
+        private_metadata_list: list[MetadataInput] = cleaned_input.pop(
+            "private_metadata", None
+        )
+
+        metadata_collection = cls.create_metadata_from_graphql_input(
+            metadata_list, error_field_name="metadata"
+        )
+        private_metadata_collection = cls.create_metadata_from_graphql_input(
+            private_metadata_list, error_field_name="private_metadata"
+        )
+
         codes_data = cleaned_input.pop("add_codes", None)
         code = cleaned_input.pop("code", None)
 
@@ -294,7 +301,7 @@ class VoucherCreate(ModelMutation):
         )
 
         cls.validate_and_update_metadata(
-            voucher_instance, metadata_list, private_metadata_list
+            voucher_instance, metadata_collection, private_metadata_collection
         )
 
         cls.clean_voucher_instance(info, voucher_instance)

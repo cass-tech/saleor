@@ -1,17 +1,16 @@
 from decimal import Decimal
 
+import graphene
 import pytest
 from prices import Money, TaxedMoney
 
 from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ...discount import DiscountType, DiscountValueType
-from ...discount.interface import VariantPromotionRuleInfo
 from ...giftcard import GiftCardEvents
 from ...giftcard.models import GiftCardEvent
 from ...graphql.order.utils import OrderLineData
 from ...payment import TransactionEventType
 from ...plugins.manager import get_plugins_manager
-from ...product.models import VariantChannelListingPromotionRule
 from .. import OrderGrantedRefundStatus, OrderStatus
 from ..events import OrderEvents
 from ..fetch import OrderLineInfo
@@ -21,11 +20,12 @@ from ..utils import (
     add_variant_to_order,
     calculate_order_granted_refund_status,
     change_order_line_quantity,
-    create_order_line_discounts,
     get_order_country,
     get_total_order_discount_excluding_shipping,
     get_valid_shipping_methods_for_order,
     match_orders_with_new_user,
+    order_info_for_logs,
+    store_user_addresses_from_draft_order,
     update_order_display_gross_prices,
 )
 
@@ -72,8 +72,9 @@ def test_change_quantity_generates_proper_event(
         line_info,
         previous_quantity,
         new_quantity,
-        order_with_lines.channel,
+        order_with_lines,
         get_plugins_manager(allow_replica=False),
+        allocate_stock=order_with_lines.is_unconfirmed(),
     )
 
     if removed_count:
@@ -124,7 +125,7 @@ def test_change_quantity_update_line_fields(
         line_info,
         line.quantity,
         new_quantity,
-        order_with_lines.channel,
+        order_with_lines,
         get_plugins_manager(allow_replica=False),
     )
 
@@ -167,6 +168,7 @@ def test_match_draft_order_with_new_user(customer_user, channel_USD):
         user_email=customer_user.email,
         status=OrderStatus.DRAFT,
         channel=channel_USD,
+        lines_count=0,
     )
     match_orders_with_new_user(customer_user)
 
@@ -317,6 +319,7 @@ def test_add_gift_cards_to_order(
 ):
     # given
     checkout = checkout_with_item
+    checkout.email = staff_user.email
     checkout.user = staff_user
     checkout.gift_cards.add(gift_card, gift_card_expiry_date)
     manager = get_plugins_manager(allow_replica=False)
@@ -372,6 +375,7 @@ def test_add_gift_cards_to_order_with_more_than_total(
     # given
     checkout = checkout_with_item
     checkout.user = staff_user
+    checkout.email = staff_user.email
     checkout.gift_cards.add(gift_card_expiry_date, gift_card)
     manager = get_plugins_manager(allow_replica=False)
     lines, _ = fetch_checkout_lines(checkout)
@@ -577,95 +581,6 @@ def test_get_order_country_use_channel_country(order):
     assert country == order.channel.default_country
 
 
-def test_create_order_line_discounts(
-    order_line,
-    catalogue_promotion,
-    promotion_translation_fr,
-    promotion_rule_translation_fr,
-):
-    # given
-    promotion = catalogue_promotion
-    rules = promotion.rules.all()
-    rule_1 = rules[0]
-    rule_2 = rules[1]
-
-    order = order_line.order
-    variant = order_line.variant
-    variant_channel_listing = variant.channel_listings.get(
-        channel_id=order_line.order.channel_id
-    )
-
-    (
-        listing_promotion_rule_1,
-        listing_promotion_rule_2,
-    ) = VariantChannelListingPromotionRule.objects.bulk_create(
-        [
-            VariantChannelListingPromotionRule(
-                variant_channel_listing=variant_channel_listing,
-                promotion_rule=rule_1,
-                discount_amount=Decimal("10.0"),
-                currency=order.currency,
-            ),
-            VariantChannelListingPromotionRule(
-                variant_channel_listing=variant_channel_listing,
-                promotion_rule=rule_2,
-                discount_amount=Decimal("5.0"),
-                currency=order.currency,
-            ),
-        ]
-    )
-
-    promotion_rule_translation_fr.promotion_rule = rule_1
-    promotion_rule_translation_fr.save(update_fields=["promotion_rule"])
-
-    rules_info = [
-        VariantPromotionRuleInfo(
-            rule=rule_1,
-            variant_listing_promotion_rule=listing_promotion_rule_1,
-            promotion=promotion,
-            promotion_translation=promotion_translation_fr,
-            rule_translation=promotion_rule_translation_fr,
-        ),
-        VariantPromotionRuleInfo(
-            rule=rule_2,
-            variant_listing_promotion_rule=listing_promotion_rule_2,
-            promotion=promotion,
-            promotion_translation=promotion_translation_fr,
-            rule_translation=None,
-        ),
-    ]
-
-    # when
-    line_discounts = create_order_line_discounts(order_line, rules_info)
-
-    # then
-    assert len(line_discounts) == 2
-    discount_1, discount_2 = line_discounts
-
-    for discount in [discount_1, discount_2]:
-        assert discount.line == order_line
-        assert discount.type == DiscountType.PROMOTION
-        assert discount.currency == order.currency
-        assert discount.reason is None
-
-    assert discount_1.amount_value == listing_promotion_rule_1.discount_amount
-    assert discount_1.value_type == rule_1.reward_value_type
-    assert discount_1.value == rule_1.reward_value
-    assert discount_1.name == f"{promotion.name}: {rule_1.name}"
-    assert (
-        discount_1.translated_name
-        == f"{promotion_translation_fr.name}: {promotion_rule_translation_fr.name}"
-    )
-    assert discount_1.promotion_rule == rule_1
-
-    assert discount_2.amount_value == listing_promotion_rule_2.discount_amount
-    assert discount_2.value_type == rule_2.reward_value_type
-    assert discount_2.value == rule_2.reward_value
-    assert discount_2.name == f"{promotion.name}: {rule_2.name}"
-    assert discount_2.translated_name == f"{promotion_translation_fr.name}"
-    assert discount_2.promotion_rule == rule_2
-
-
 @pytest.mark.parametrize(
     ("expected_granted_status", "event_type"),
     [
@@ -705,3 +620,235 @@ def test_calculate_order_granted_refund_status(
     # then
     granted_refund.refresh_from_db()
     assert granted_refund.status == expected_granted_status
+
+
+def test_order_info_for_logs(order_with_lines, voucher, order_promotion_with_rule):
+    # given
+    order = order_with_lines
+    voucher_code = voucher.codes.first().code
+    order.voucher_code = voucher_code
+    order.voucher = voucher
+    order.status = OrderStatus.DRAFT
+    order.save(update_fields=["voucher_code", "voucher_id", "status"])
+
+    order.discounts.create(
+        type=DiscountType.ORDER_PROMOTION,
+        value_type=DiscountValueType.FIXED,
+        value=Decimal(5),
+        amount_value=Decimal(5),
+        promotion_rule=order_promotion_with_rule.rules.first(),
+        currency=order.currency,
+    )
+
+    lines = order.lines.all()
+    lines[0].discounts.create(
+        type=DiscountType.VOUCHER,
+        value_type=DiscountValueType.FIXED,
+        value=Decimal(5),
+        currency=order.currency,
+        amount_value=Decimal(5),
+        voucher=voucher,
+    )
+
+    # when
+    extra = order_info_for_logs(order, lines)
+
+    # then
+    assert extra["order_id"] == graphene.Node.to_global_id("Order", order.pk)
+    assert extra["discounts"]
+    assert extra["lines"][0]["discounts"]
+
+
+def test_store_user_addresses_from_draft_order(order, customer_user, address_usa):
+    # given
+    order.status = OrderStatus.DRAFT
+    order.user = customer_user
+    order.billing_address = address_usa
+    order.draft_save_shipping_address = True
+    order.draft_save_billing_address = True
+    order.save(
+        update_fields=[
+            "user",
+            "draft_save_shipping_address",
+            "draft_save_billing_address",
+            "billing_address",
+        ]
+    )
+
+    customer_user.addresses.clear()
+    manager = get_plugins_manager(allow_replica=False)
+
+    # when
+    store_user_addresses_from_draft_order(order, manager)
+
+    # then
+    customer_user.refresh_from_db()
+    assert customer_user.addresses.count() == 2
+    # ensure that the addresses are not the same instances are addresses assigned to order
+    customer_address_ids = set(customer_user.addresses.values_list("id", flat=True))
+    order_address_ids = {order.billing_address_id, order.shipping_address_id}
+    assert not (customer_address_ids & order_address_ids)
+
+    order.refresh_from_db()
+    assert order.draft_save_shipping_address is None
+    assert order.draft_save_billing_address is None
+
+
+def test_store_user_addresses_from_draft_order_no_user(order):
+    # given draft order without user set
+    order.user = None
+    order.draft_save_shipping_address = True
+    order.draft_save_billing_address = True
+    order.save(
+        update_fields=[
+            "user",
+            "draft_save_shipping_address",
+            "draft_save_billing_address",
+        ]
+    )
+
+    manager = get_plugins_manager(allow_replica=False)
+
+    # when
+    store_user_addresses_from_draft_order(order, manager)
+
+    # then
+    order.refresh_from_db()
+    assert order.draft_save_shipping_address is None
+    assert order.draft_save_billing_address is None
+
+
+def test_store_user_addresses_from_draft_order_save_address_options_set_to_false(
+    order, customer_user, address_usa
+):
+    # given
+    order.status = OrderStatus.DRAFT
+    order.user = customer_user
+    order.billing_address = address_usa
+    order.draft_save_shipping_address = False
+    order.draft_save_billing_address = False
+    order.save(
+        update_fields=[
+            "user",
+            "draft_save_shipping_address",
+            "draft_save_billing_address",
+            "billing_address",
+        ]
+    )
+
+    customer_user.addresses.clear()
+    manager = get_plugins_manager(allow_replica=False)
+
+    # when
+    store_user_addresses_from_draft_order(order, manager)
+
+    # then
+    customer_user.refresh_from_db()
+    assert customer_user.addresses.count() == 0
+
+    order.refresh_from_db()
+    assert order.draft_save_shipping_address is None
+    assert order.draft_save_billing_address is None
+
+
+def test_store_user_addresses_from_draft_order_save_address_options_empty(
+    order, customer_user, address_usa
+):
+    # given
+    order.status = OrderStatus.DRAFT
+    order.user = customer_user
+    order.billing_address = address_usa
+    order.draft_save_shipping_address = None
+    order.draft_save_billing_address = None
+    order.save(
+        update_fields=[
+            "user",
+            "draft_save_shipping_address",
+            "draft_save_billing_address",
+            "billing_address",
+        ]
+    )
+
+    customer_user.addresses.clear()
+    manager = get_plugins_manager(allow_replica=False)
+
+    # when
+    store_user_addresses_from_draft_order(order, manager)
+
+    # then
+    customer_user.refresh_from_db()
+    assert customer_user.addresses.count() == 0
+
+    order.refresh_from_db()
+    assert order.draft_save_shipping_address is None
+    assert order.draft_save_billing_address is None
+
+
+def test_store_user_addresses_from_draft_order_only_draft_save_shipping_address_true(
+    order, customer_user, address_usa
+):
+    # given
+    order.status = OrderStatus.DRAFT
+    order.user = customer_user
+    order.billing_address = address_usa
+    order.draft_save_shipping_address = True
+    order.draft_save_billing_address = None
+    order.save(
+        update_fields=[
+            "user",
+            "draft_save_shipping_address",
+            "draft_save_billing_address",
+            "billing_address",
+        ]
+    )
+
+    customer_user.addresses.clear()
+    manager = get_plugins_manager(allow_replica=False)
+
+    # when
+    store_user_addresses_from_draft_order(order, manager)
+
+    # then
+    customer_user.refresh_from_db()
+    assert customer_user.addresses.count() == 1
+    # ensure that the addresses are not the same instances are addresses assigned to order
+    assert customer_user.addresses.first().id != order.shipping_address_id
+
+    order.refresh_from_db()
+    assert order.draft_save_shipping_address is None
+    assert order.draft_save_billing_address is None
+
+
+def test_store_user_addresses_from_draft_order_only_draft_save_billing_address_true(
+    order, customer_user, address_usa
+):
+    # given
+    order.status = OrderStatus.DRAFT
+    order.user = customer_user
+    order.billing_address = address_usa
+    order.draft_save_shipping_address = None
+    order.draft_save_billing_address = True
+    order.save(
+        update_fields=[
+            "user",
+            "draft_save_shipping_address",
+            "draft_save_billing_address",
+            "billing_address",
+        ]
+    )
+
+    customer_user.addresses.clear()
+    manager = get_plugins_manager(allow_replica=False)
+
+    # when
+    store_user_addresses_from_draft_order(order, manager)
+
+    # then
+    customer_user.refresh_from_db()
+    assert customer_user.addresses.count() == 1
+    # ensure that the addresses are not the same instances are addresses assigned to order
+    assert customer_user.addresses.first().id != order.billing_address_id
+
+    order.refresh_from_db()
+    assert order.draft_save_shipping_address is None
+    assert order.draft_save_billing_address is None

@@ -1,4 +1,4 @@
-from typing import Optional, cast
+from typing import cast
 
 from django.contrib.auth import authenticate
 from django.http import HttpRequest
@@ -28,11 +28,12 @@ def get_context_value(request: HttpRequest) -> SaleorContext:
 
 def clear_context(context: SaleorContext):
     context.dataloaders.clear()
+    del context.user
 
 
 class RequestWithUser(HttpRequest):
-    _cached_user: Optional[User]
-    app: Optional[App]
+    _cached_user: User | None
+    app: App | None
 
 
 def set_decoded_auth_token(request: SaleorContext):
@@ -48,18 +49,18 @@ def set_app_on_context(request: SaleorContext):
         request.app = get_app_promise(request).get()
 
 
-def get_user(request: SaleorContext) -> Optional[User]:
+def get_user(request: SaleorContext) -> User | None:
     if not hasattr(request, "_cached_user"):
-        request._cached_user = cast(Optional[User], authenticate(request=request))
+        request._cached_user = cast(User | None, authenticate(request=request))
     return request._cached_user
 
 
 def set_auth_on_context(request: SaleorContext):
     if hasattr(request, "app") and request.app:
-        request.user = SimpleLazyObject(lambda: None)  # type: ignore
-        return request
+        request.user = SimpleLazyObject(lambda: None)  # type: ignore[assignment]
+        return
 
     def user():
         return get_user(request) or None
 
-    request.user = SimpleLazyObject(user)  # type: ignore
+    request.user = SimpleLazyObject(user)  # type: ignore[assignment]

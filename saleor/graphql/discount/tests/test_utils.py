@@ -281,7 +281,7 @@ def test_get_variants_for_promotion(
     variant, product_with_two_variants, product_variant_list
 ):
     # given
-    reward_value = Decimal("2")
+    reward_value = Decimal(2)
     promotion = Promotion.objects.create(
         name="Promotion",
     )
@@ -480,3 +480,28 @@ def test_promotion_rule_should_be_marked_with_dirty_variants_missing_channels(
 
     # then
     assert not result
+
+
+def test_get_variants_for_catalogue_predicate_with_inner_or_operator(
+    product_variant_list,
+):
+    # given
+    variant_1, variant_2 = product_variant_list[:2]
+
+    catalogue_predicate = {
+        "variantPredicate": {
+            "OR": [
+                {"ids": [graphene.Node.to_global_id("ProductVariant", variant_1.id)]},
+                {"ids": [graphene.Node.to_global_id("ProductVariant", variant_2.id)]},
+            ]
+        }
+    }
+
+    # when
+    variants = get_variants_for_catalogue_predicate(catalogue_predicate)
+
+    # then
+    assert variant_1 in variants
+    assert variant_2 in variants
+    for variant in product_variant_list[2:]:
+        assert variant not in variants

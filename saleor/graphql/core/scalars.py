@@ -1,3 +1,4 @@
+import datetime
 import decimal
 
 import graphene
@@ -19,35 +20,55 @@ class Decimal(graphene.Float):
     """
 
     @staticmethod
-    def parse_literal(node):
-        try:
-            return decimal.Decimal(node.value)
-        except decimal.DecimalException:
-            return None
+    def parse_literal(node) -> decimal.Decimal | None:
+        if isinstance(node, ast.FloatValue | ast.IntValue):
+            try:
+                return decimal.Decimal(node.value)
+            except decimal.DecimalException:
+                return None
+        return None
 
     @staticmethod
-    def parse_value(value):
+    def parse_value(value) -> decimal.Decimal | None:
         try:
             # Converting the float to str before parsing it to Decimal is
             # necessary to keep the decimal places as typed
             value = str(value)
-            return decimal.Decimal(value)
+            value = decimal.Decimal(value)
+            if value.is_infinite():
+                return None
+            if value.is_nan():
+                return None
+            if value.is_subnormal():
+                return None
+            return value
         except decimal.DecimalException:
             return None
 
 
-class PositiveDecimal(Decimal):
+class PositiveDecimal(graphene.Float):
     """Nonnegative Decimal scalar implementation.
 
     Should be used in places where value must be nonnegative (0 or greater).
     """
 
     @staticmethod
-    def parse_value(value):
-        value = super(PositiveDecimal, PositiveDecimal).parse_value(value)
-        if value and value < 0:
-            return None
-        return value
+    def parse_value(value) -> decimal.Decimal | None:
+        parsed_value = Decimal.parse_value(value)
+
+        if (parsed_value is not None) and parsed_value >= 0:
+            return parsed_value
+
+        return None
+
+    @staticmethod
+    def parse_literal(node) -> decimal.Decimal | None:
+        parsed_value = Decimal.parse_literal(node)
+
+        if (parsed_value is not None) and parsed_value >= 0:
+            return parsed_value
+
+        return None
 
 
 class JSON(GenericScalar):
@@ -58,7 +79,7 @@ class JSON(GenericScalar):
                 field.name.value: GenericScalar.parse_literal(field.value)
                 for field in node.fields
             }
-        elif isinstance(node, ast.ListValue):
+        if isinstance(node, ast.ListValue):
             return [GenericScalar.parse_literal(value) for value in node.values]
         return None
 
@@ -123,21 +144,42 @@ class WeightScalar(graphene.Scalar):
 class UUID(graphene.UUID):
     @staticmethod
     def serialize(uuid):
-        return super(UUID, UUID).serialize(uuid)
+        return graphene.UUID.serialize(uuid)
 
     @staticmethod
     def parse_literal(node):
         try:
-            return super(UUID, UUID).parse_literal(node)
+            return graphene.UUID.parse_literal(node)
         except ValueError:
             return None
 
     @staticmethod
     def parse_value(value):
         try:
-            return super(UUID, UUID).parse_value(value)
+            return graphene.UUID.parse_value(value)
         except ValueError:
             return None
+
+
+# The custom DateTime scalar is needed as graphene.DateTime allows to save the date-time
+# value in format that is not supported by datetime module.
+# The custom validation makes additional check to confirm that the value is correct
+# Value like this `0001-01-01T00:00:01+07:00` will generate the BC date, which without
+# additional check will be saved in the database as UTC BC time:
+# `0001-12-31 17:00:01+00 BC`.
+class DateTime(graphene.DateTime):
+    __doc__ = graphene.DateTime.__doc__
+
+    @staticmethod
+    def parse_value(value):
+        parsed_value = graphene.DateTime.parse_value(value)
+        if parsed_value is not None and isinstance(parsed_value, datetime.datetime):
+            if parsed_value.year in [datetime.MINYEAR, datetime.MAXYEAR]:
+                try:
+                    parsed_value.astimezone(tz=datetime.UTC)
+                except OverflowError:
+                    return None
+        return parsed_value
 
 
 # The custom Date scalar is needed as the currently used graphene 2 version is not
@@ -154,11 +196,15 @@ class Date(graphene.Date):
         # The current graphene version returning unhandled `IndexError`.
         if isinstance(value, str) and not value:
             return None
-        return super(Date, Date).parse_value(value)
+        return graphene.Date.parse_value(value)
 
 
 class Minute(graphene.Int):
     """The `Minute` scalar type represents number of minutes by integer value."""
+
+
+class Hour(graphene.Int):
+    """The `Hour` scalar type represents number of hours by integer value."""
 
 
 class Day(graphene.Int):

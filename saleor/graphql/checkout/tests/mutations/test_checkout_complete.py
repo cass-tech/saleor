@@ -19,10 +19,6 @@ from .....payment.model_helpers import get_subtotal
 from .....plugins import PLUGIN_IDENTIFIER_PREFIX
 from .....plugins.manager import get_plugins_manager
 from .....plugins.tests.sample_plugins import PluginSample
-from .....plugins.webhook.conftest import (  # noqa: F401
-    tax_data_response,
-    tax_line_data_response,
-)
 from .....webhook.event_types import WebhookEventSyncType
 from ....core.utils import to_global_id_or_none
 from ....tests.utils import get_graphql_content
@@ -254,9 +250,9 @@ def test_checkout_complete_0_total_value_no_payment(
     assert order.shipping_address is None
     assert order.shipping_method is None
 
-    assert not Checkout.objects.filter(
-        pk=checkout.pk
-    ).exists(), "Checkout should have been deleted"
+    assert not Checkout.objects.filter(pk=checkout.pk).exists(), (
+        "Checkout should have been deleted"
+    )
 
 
 @pytest.mark.integration
@@ -321,9 +317,9 @@ def test_checkout_complete_0_total_value_from_voucher(
     assert order.shipping_address is None
     assert order.shipping_method is None
 
-    assert not Checkout.objects.filter(
-        pk=checkout.pk
-    ).exists(), "Checkout should have been deleted"
+    assert not Checkout.objects.filter(pk=checkout.pk).exists(), (
+        "Checkout should have been deleted"
+    )
 
 
 @pytest.mark.integration
@@ -384,9 +380,9 @@ def test_checkout_complete_0_total_value_from_giftcard(
     assert order.shipping_address is None
     assert order.shipping_method is None
 
-    assert not Checkout.objects.filter(
-        pk=checkout.pk
-    ).exists(), "Checkout should have been deleted"
+    assert not Checkout.objects.filter(pk=checkout.pk).exists(), (
+        "Checkout should have been deleted"
+    )
 
 
 @freeze_time()
@@ -432,12 +428,14 @@ def test_checkout_complete_fails_with_invalid_tax_app(
     data = content["data"]["checkoutComplete"]
     assert len(data["errors"]) == 1
     assert data["errors"][0]["code"] == CheckoutErrorCode.TAX_ERROR.name
-    assert data["errors"][0]["message"] == "Configured Tax App didn't responded."
+    assert (
+        data["errors"][0]["message"] == "Configured Tax App returned invalid response."
+    )
     assert not EventDelivery.objects.exists()
 
     checkout.refresh_from_db()
     assert checkout.price_expiration == timezone.now() + settings.CHECKOUT_PRICES_TTL
-    assert checkout.tax_error == "Empty tax data."
+    assert checkout.tax_error == "Configured tax app doesn't exist."
 
 
 @freeze_time()
@@ -450,13 +448,15 @@ def test_checkout_complete_calls_correct_tax_app(
     channel_USD,
     address,
     tax_app,
-    tax_data_response,  # noqa: F811
+    tax_data_response_factory,  # noqa: F811
     settings,
 ):
     # given
-    mock_request.return_value = tax_data_response
-
     checkout = checkout_without_shipping_required
+    mock_request.return_value = tax_data_response_factory(
+        lines_length=checkout.lines.count()
+    )
+
     checkout.billing_address = address
     checkout.price_expiration = timezone.now()
     checkout.metadata_storage.store_value_in_metadata(items={"accepted": "true"})
@@ -480,11 +480,11 @@ def test_checkout_complete_calls_correct_tax_app(
     user_api_client.post_graphql(MUTATION_CHECKOUT_COMPLETE, variables)
 
     # then
-    delivery = EventDelivery.objects.get()
+    mock_request.assert_called_once()
+    delivery = mock_request.call_args[0][0]
     assert delivery.status == EventDeliveryStatus.PENDING
     assert delivery.event_type == WebhookEventSyncType.CHECKOUT_CALCULATE_TAXES
     assert delivery.webhook.app == tax_app
-    mock_request.assert_called_once_with(delivery)
 
     checkout.refresh_from_db()
     assert checkout.price_expiration == timezone.now() + settings.CHECKOUT_PRICES_TTL
@@ -505,9 +505,11 @@ def test_checkout_complete_calls_failing_plugin(
     settings,
 ):
     # given
+    tax_error_message = "Test error"
+
     def side_effect(checkout_info, *args, **kwargs):
         price = Money("10.0", checkout_info.checkout.currency)
-        checkout_info.checkout.tax_error = "Test error"
+        checkout_info.checkout.tax_error = tax_error_message
         return TaxedMoney(price, price)
 
     mock_calculate_checkout_line_total.side_effect = side_effect
@@ -540,11 +542,13 @@ def test_checkout_complete_calls_failing_plugin(
     data = content["data"]["checkoutComplete"]
     assert len(data["errors"]) == 1
     assert data["errors"][0]["code"] == CheckoutErrorCode.TAX_ERROR.name
-    assert data["errors"][0]["message"] == "Configured Tax App didn't responded."
+    assert (
+        data["errors"][0]["message"] == "Configured Tax App returned invalid response."
+    )
 
     checkout.refresh_from_db()
     assert checkout.price_expiration == timezone.now() + settings.CHECKOUT_PRICES_TTL
-    assert checkout.tax_error == "Empty tax data."
+    assert checkout.tax_error == tax_error_message
 
 
 @freeze_time()
@@ -557,13 +561,17 @@ def test_checkout_complete_calls_correct_force_tax_calculation_when_tax_error_wa
     channel_USD,
     address,
     tax_app,
-    tax_data_response,  # noqa: F811
+    tax_data_response_factory,  # noqa: F811
     settings,
 ):
     # given
-    mock_request.return_value = tax_data_response
 
     checkout = checkout_without_shipping_required
+
+    mock_request.return_value = tax_data_response_factory(
+        lines_length=checkout.lines.count()
+    )
+
     checkout.billing_address = address
     checkout.price_expiration = (
         timezone.now() + settings.CHECKOUT_PRICES_TTL + timezone.timedelta(hours=1)
@@ -591,12 +599,65 @@ def test_checkout_complete_calls_correct_force_tax_calculation_when_tax_error_wa
     user_api_client.post_graphql(MUTATION_CHECKOUT_COMPLETE, variables)
 
     # then
-    delivery = EventDelivery.objects.get()
+    mock_request.assert_called_once()
+    delivery = mock_request.call_args[0][0]
     assert delivery.status == EventDeliveryStatus.PENDING
     assert delivery.event_type == WebhookEventSyncType.CHECKOUT_CALCULATE_TAXES
     assert delivery.webhook.app == tax_app
-    mock_request.assert_called_once_with(delivery)
 
     checkout.refresh_from_db()
     assert checkout.price_expiration == timezone.now() + settings.CHECKOUT_PRICES_TTL
     assert checkout.tax_error is None
+
+
+def test_checkout_complete_existing_user_address_save_address_options_off(
+    user_api_client,
+    checkout_with_item_total_0,
+    customer_user,
+):
+    # given the checkout with the billing address that is currently in user address book
+    # and the save_address option set to False
+    checkout = checkout_with_item_total_0
+
+    address = customer_user.addresses.first()
+    user_address_count = customer_user.addresses.count()
+
+    checkout.billing_address = address
+    checkout.shipping_address = address
+    checkout.save_shipping_address = False
+    checkout.save_billing_address = False
+    checkout.save(
+        update_fields=[
+            "billing_address",
+            "shipping_address",
+            "save_shipping_address",
+            "save_billing_address",
+        ]
+    )
+
+    orders_count = Order.objects.count()
+    variables = {
+        "id": to_global_id_or_none(checkout),
+        "redirectUrl": "https://www.example.com",
+    }
+
+    # when checkout is completed
+    response = user_api_client.post_graphql(MUTATION_CHECKOUT_COMPLETE, variables)
+
+    # then the addresses are not saved or removed from the user address book
+    content = get_graphql_content(response)
+    data = content["data"]["checkoutComplete"]
+    assert not data["errors"]
+
+    assert Order.objects.count() == orders_count + 1
+    order = Order.objects.first()
+
+    assert not Checkout.objects.filter(pk=checkout.pk).exists(), (
+        "Checkout should have been deleted"
+    )
+    assert order.billing_address
+    assert order.shipping_address
+    assert customer_user.addresses.count() == user_address_count
+
+    assert order.draft_save_billing_address is None
+    assert order.draft_save_shipping_address is None

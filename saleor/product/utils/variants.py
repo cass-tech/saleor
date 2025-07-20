@@ -1,11 +1,12 @@
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
+from django.conf import settings
 from django.db.models import QuerySet
 
 from ...attribute import AttributeType
 from ...discount.models import PromotionRule
-from ...discount.utils import update_rule_variant_relation
+from ...discount.utils.promotion import update_rule_variant_relation
 from ..models import ProductVariant
 
 if TYPE_CHECKING:
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
 
 
 def generate_and_set_variant_name(
-    variant: "ProductVariant", sku: Optional[str], save: Optional[bool] = True
+    variant: "ProductVariant", sku: str | None, save: bool | None = True
 ):
     """Generate ProductVariant's name based on its attributes."""
     attributes_display = []
@@ -23,7 +24,7 @@ def generate_and_set_variant_name(
         assignment__attribute__type=AttributeType.PRODUCT_TYPE,
     )
     attribute_rel: AssignedVariantAttribute
-    for attribute_rel in variant_selection_attributes.iterator():
+    for attribute_rel in variant_selection_attributes.iterator(chunk_size=1000):
         values_qs = attribute_rel.values.all()
         attributes_display.append(", ".join([str(value) for value in values_qs]))
 
@@ -52,15 +53,16 @@ def get_variant_selection_attributes(
     ]
 
 
-def fetch_variants_for_promotion_rules(
-    rules: QuerySet[PromotionRule],
-):
+def fetch_variants_for_promotion_rules(rules: QuerySet[PromotionRule]):
     from ...graphql.discount.utils import get_variants_for_catalogue_predicate
 
     PromotionRuleVariant = PromotionRule.variants.through
     new_rules_variants = []
-    for rule in rules.iterator():
-        variants = get_variants_for_catalogue_predicate(rule.catalogue_predicate)
+    for rule in rules.iterator(chunk_size=1000):
+        variants = get_variants_for_catalogue_predicate(
+            rule.catalogue_predicate,
+            database_connection_name=settings.DATABASE_CONNECTION_REPLICA_NAME,
+        )
         new_rules_variants.extend(
             [
                 PromotionRuleVariant(
@@ -69,5 +71,4 @@ def fetch_variants_for_promotion_rules(
                 for variant_id in set(variants.values_list("pk", flat=True))
             ]
         )
-    update_rule_variant_relation(rules, new_rules_variants)
-    return new_rules_variants
+    return update_rule_variant_relation(rules, new_rules_variants)

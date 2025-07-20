@@ -1,8 +1,11 @@
 import json
+import logging
 from unittest import mock
+from unittest.mock import patch
 
 import graphene
 import pytest
+from django.shortcuts import render
 from django.test import override_settings
 from graphql.execution.base import ExecutionResult
 
@@ -153,26 +156,45 @@ def test_graphql_execution_exception(monkeypatch, api_client):
 def test_invalid_query_graphql_errors_are_logged_in_another_logger(
     api_client, graphql_log_handler
 ):
+    # given
+    handled_errors_logger = logging.getLogger("saleor.graphql.errors.handled")
+    handled_errors_logger.setLevel(logging.DEBUG)
+
+    # when
     response = api_client.post_graphql("{ shop }")
+
+    # then
     assert response.status_code == 400
     assert graphql_log_handler.messages == [
-        "saleor.graphql.errors.handled[INFO].GraphQLError"
+        "saleor.graphql.errors.handled[DEBUG].GraphQLError"
     ]
 
 
 def test_invalid_syntax_graphql_errors_are_logged_in_another_logger(
     api_client, graphql_log_handler
 ):
+    # given
+    handled_errors_logger = logging.getLogger("saleor.graphql.errors.handled")
+    handled_errors_logger.setLevel(logging.DEBUG)
+
+    # when
     response = api_client.post_graphql("{ }")
+
+    # then
     assert response.status_code == 400
     assert graphql_log_handler.messages == [
-        "saleor.graphql.errors.handled[INFO].GraphQLSyntaxError"
+        "saleor.graphql.errors.handled[DEBUG].GraphQLSyntaxError"
     ]
 
 
 def test_permission_denied_query_graphql_errors_are_logged_in_another_logger(
     api_client, graphql_log_handler
 ):
+    # given
+    handled_errors_logger = logging.getLogger("saleor.graphql.errors.handled")
+    handled_errors_logger.setLevel(logging.DEBUG)
+
+    # when
     response = api_client.post_graphql(
         """
         mutation {
@@ -184,9 +206,11 @@ def test_permission_denied_query_graphql_errors_are_logged_in_another_logger(
         }
         """
     )
+
+    # then
     assert response.status_code == 200
     assert graphql_log_handler.messages == [
-        "saleor.graphql.errors.handled[INFO].PermissionDenied"
+        "saleor.graphql.errors.handled[DEBUG].PermissionDenied"
     ]
 
 
@@ -251,6 +275,9 @@ def test_unexpected_exceptions_are_logged_in_their_own_logger(
 def test_query_contains_not_only_schema_raise_error(
     other_query, api_client, graphql_log_handler
 ):
+    # given
+    handled_errors_logger = logging.getLogger("saleor.graphql.errors.handled")
+    handled_errors_logger.setLevel(logging.DEBUG)
     query = """
         query IntrospectionQuery {
             %(other_query)s
@@ -261,10 +288,14 @@ def test_query_contains_not_only_schema_raise_error(
             }
         }
         """
+
+    # when
     response = api_client.post_graphql(query % {"other_query": other_query})
+
+    # then
     assert response.status_code == 400
     assert graphql_log_handler.messages == [
-        "saleor.graphql.errors.handled[INFO].GraphQLError"
+        "saleor.graphql.errors.handled[DEBUG].GraphQLError"
     ]
 
 
@@ -329,10 +360,13 @@ def test_generate_cache_key_use_saleor_version():
     assert saleor_version in cache_key
 
 
-def test_graphql_view_clears_context(rf, staff_user, product):
+def test_graphql_view_clears_context(rf, staff_user, product, channel_USD):
     # given
     product_id = graphene.Node.to_global_id("Product", product.pk)
-    data = {"query": '{ product(id: "%s") { name category { name } } }' % product_id}
+    channel_slug = channel_USD.slug
+    data = {
+        "query": f'{{ product(id: "{product_id}" channel: "{channel_slug}") {{ name category {{ name }} }} }}'
+    }
     request = rf.post(path="/", data=data, content_type="application/json")
     request.app = None
     request.user = staff_user
@@ -347,3 +381,37 @@ def test_graphql_view_clears_context(rf, staff_user, product):
     assert json_data["data"]["product"]["category"]["name"] == product.category.name
     assert response.status_code == 200
     assert request.dataloaders == {}
+
+
+@pytest.mark.parametrize(
+    ("public_url", "expected_url_base"),
+    [
+        (None, "http://testserver"),
+        ("http://some_custom_domain.com", "http://some_custom_domain.com"),
+    ],
+)
+@patch("saleor.graphql.views.render", wraps=render)
+def test_playground_is_rendered_with_proper_api_url_if_public_url_is_set(
+    mocked_render, rf, settings, public_url, expected_url_base
+):
+    # given
+    request = rf.get(
+        path="/",
+    )
+    request.app = None
+    request.user = None
+    settings.PUBLIC_URL = public_url
+
+    # when
+    view = GraphQLView.as_view(backend=backend, schema=schema)
+    view(request)
+
+    # then
+    mocked_render.assert_called_once_with(
+        request,
+        "graphql/playground.html",
+        {
+            "api_url": f"{expected_url_base}/graphql/",
+            "plugins_url": f"{expected_url_base}/plugins/",
+        },
+    )

@@ -7,10 +7,11 @@ from ....core.tracing import traced_atomic_transaction
 from ....permission.enums import ProductPermissions
 from ....product import models
 from ....warehouse import models as warehouse_models
+from ....warehouse.management import stock_bulk_update
 from ....webhook.event_types import WebhookEventAsyncType
 from ....webhook.utils import get_webhooks_for_event
-from ...channel import ChannelContext
 from ...core import ResolveInfo
+from ...core.context import ChannelContext
 from ...core.doc_category import DOC_CATEGORY_PRODUCTS
 from ...core.types import BulkStockError, NonNullList
 from ...core.validators import validate_one_of_args_is_in_mutation
@@ -97,7 +98,7 @@ class ProductVariantStocksUpdate(ProductVariantStocksCreate):
         webhooks_stock_update = get_webhooks_for_event(
             WebhookEventAsyncType.PRODUCT_VARIANT_STOCK_UPDATED
         )
-        for stock_data, warehouse in zip(stocks_data, warehouses):
+        for stock_data, warehouse in zip(stocks_data, warehouses, strict=False):
             stock, is_created = warehouse_models.Stock.objects.get_or_create(
                 product_variant=variant, warehouse=warehouse
             )
@@ -123,10 +124,10 @@ class ProductVariantStocksUpdate(ProductVariantStocksCreate):
 
             stock.quantity = stock_data["quantity"]
             stocks.append(stock)
-            cls.call_event(
-                manager.product_variant_stock_updated,
-                stock,
-                webhooks=webhooks_stock_update,
-            )
+        cls.call_event(
+            manager.product_variant_stocks_updated,
+            stocks,
+            webhooks=webhooks_stock_update,
+        )
 
-        warehouse_models.Stock.objects.bulk_update(stocks, ["quantity"])
+        stock_bulk_update(stocks, ["quantity"])

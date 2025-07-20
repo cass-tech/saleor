@@ -1,6 +1,6 @@
 """Checkout-related ORM models."""
 
-from datetime import date
+import datetime
 from decimal import Decimal
 from operator import attrgetter
 from typing import TYPE_CHECKING, Optional
@@ -12,12 +12,12 @@ from django.db import models
 from django.utils import timezone
 from django.utils.encoding import smart_str
 from django_countries.fields import Country, CountryField
-from django_prices.models import MoneyField, TaxedMoneyField
 from prices import Money
 
 from ..channel.models import Channel
+from ..core.db.fields import MoneyField, TaxedMoneyField
 from ..core.models import ModelWithMetadata
-from ..core.taxes import zero_money
+from ..core.taxes import TAX_ERROR_FIELD_LENGTH, zero_money
 from ..giftcard.models import GiftCard
 from ..permission.enums import CheckoutPermissions
 from ..shipping.models import ShippingMethod
@@ -58,6 +58,7 @@ class Checkout(models.Model):
         related_name="checkouts",
         on_delete=models.PROTECT,
     )
+    save_billing_address = models.BooleanField(default=True)
     billing_address = models.ForeignKey(
         "account.Address",
         related_name="+",
@@ -65,6 +66,8 @@ class Checkout(models.Model):
         null=True,
         on_delete=models.SET_NULL,
     )
+    # do not apply on checkouts with collection point
+    save_shipping_address = models.BooleanField(default=True)
     shipping_address = models.ForeignKey(
         "account.Address",
         related_name="+",
@@ -79,6 +82,14 @@ class Checkout(models.Model):
         related_name="checkouts",
         on_delete=models.SET_NULL,
     )
+
+    shipping_method_name = models.CharField(
+        max_length=255, null=True, default=None, blank=True, editable=False
+    )
+    external_shipping_method_id = models.CharField(
+        max_length=512, null=True, default=None, blank=True, editable=False
+    )
+
     collection_point = models.ForeignKey(
         "warehouse.Warehouse",
         blank=True,
@@ -157,6 +168,17 @@ class Checkout(models.Model):
         max_digits=5, decimal_places=4, default=Decimal("0.0")
     )
 
+    undiscounted_base_shipping_price_amount = models.DecimalField(
+        max_digits=settings.DEFAULT_MAX_DIGITS,
+        decimal_places=settings.DEFAULT_DECIMAL_PLACES,
+        default=Decimal(0),
+    )
+    # Shipping price before applying any discounts
+    undiscounted_base_shipping_price = MoneyField(
+        amount_field="undiscounted_base_shipping_price_amount",
+        currency_field="currency",
+    )
+
     authorize_status = models.CharField(
         max_length=32,
         default=CheckoutAuthorizeStatus.NONE,
@@ -198,7 +220,9 @@ class Checkout(models.Model):
     )
 
     tax_exemption = models.BooleanField(default=False)
-    tax_error = models.CharField(max_length=255, blank=True, null=True)
+    tax_error = models.CharField(
+        max_length=TAX_ERROR_FIELD_LENGTH, blank=True, null=True
+    )
 
     class Meta:
         ordering = ("-last_change", "pk")
@@ -212,8 +236,12 @@ class Checkout(models.Model):
     def __iter__(self):
         return iter(self.lines.all())
 
-    def get_customer_email(self) -> Optional[str]:
-        return self.user.email if self.user else self.email
+    def get_customer_email(self) -> str | None:
+        if self.email:
+            return self.email
+        if self.user:
+            return self.user.email
+        return None
 
     def is_shipping_required(self) -> bool:
         """Return `True` if any of the lines requires shipping."""
@@ -234,7 +262,7 @@ class Checkout(models.Model):
         """Return the total balance of the gift cards assigned to the checkout."""
         balance = (
             self.gift_cards.using(database_connection_name)
-            .active(date=date.today())
+            .active(date=datetime.datetime.now(tz=datetime.UTC).date())
             .aggregate(models.Sum("current_balance_amount"))[
                 "current_balance_amount__sum"
             ]
@@ -300,6 +328,28 @@ class CheckoutLine(ModelWithMetadata):
     )
     currency = models.CharField(
         max_length=settings.DEFAULT_CURRENCY_CODE_LENGTH,
+    )
+
+    undiscounted_unit_price_amount = models.DecimalField(
+        max_digits=settings.DEFAULT_MAX_DIGITS,
+        decimal_places=settings.DEFAULT_DECIMAL_PLACES,
+        default=Decimal(0),
+    )
+
+    undiscounted_unit_price = MoneyField(
+        amount_field="undiscounted_unit_price_amount",
+        currency_field="currency",
+    )
+
+    prior_unit_price_amount = models.DecimalField(
+        max_digits=settings.DEFAULT_MAX_DIGITS,
+        decimal_places=settings.DEFAULT_DECIMAL_PLACES,
+        blank=True,
+        null=True,
+    )
+
+    prior_unit_price = MoneyField(
+        amount_field="prior_unit_price_amount", currency_field="currency"
     )
 
     total_price_net_amount = models.DecimalField(

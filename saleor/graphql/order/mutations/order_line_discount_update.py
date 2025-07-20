@@ -8,6 +8,7 @@ from ....order.utils import invalidate_order_prices, update_discount_for_order_l
 from ....permission.enums import OrderPermissions
 from ...app.dataloaders import get_app_promise
 from ...core import ResolveInfo
+from ...core.context import SyncWebhookControlContext
 from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.types import OrderError
 from ..types import Order, OrderLine
@@ -62,8 +63,6 @@ class OrderLineDiscountUpdate(OrderDiscountCommon):
         order_line_before_update = copy.deepcopy(order_line)
         app = get_app_promise(info.context).get()
         with traced_atomic_transaction():
-            # TODO: Apply fixed order line discount to its total instead of unit price.
-            #  https://github.com/saleor/saleor/issues/14879
             update_discount_for_order_line(
                 order_line,
                 order=order,
@@ -84,4 +83,7 @@ class OrderLineDiscountUpdate(OrderDiscountCommon):
                     line_before_update=order_line_before_update,
                 )
                 invalidate_order_prices(order, save=True)
-        return OrderLineDiscountUpdate(order_line=order_line, order=order)
+        return OrderLineDiscountUpdate(
+            order_line=SyncWebhookControlContext(order_line),
+            order=SyncWebhookControlContext(order),
+        )

@@ -6,10 +6,10 @@ from ....permission.auth_filters import AuthorizationFilters
 from ...channel.types import Channel
 from ...core import ResolveInfo
 from ...core.connection import CountableConnection
-from ...core.descriptions import ADDED_IN_317, ADDED_IN_319, PREVIEW_FEATURE
+from ...core.descriptions import ADDED_IN_319, PREVIEW_FEATURE
 from ...core.doc_category import DOC_CATEGORY_DISCOUNTS
 from ...core.fields import PermissionsField
-from ...core.scalars import JSON, PositiveDecimal
+from ...core.scalars import JSON, DateTime, PositiveDecimal
 from ...core.types import ModelObjectType, NonNullList
 from ...meta.types import ObjectWithMetadata
 from ...translations.fields import TranslationField
@@ -35,14 +35,10 @@ class Promotion(ModelObjectType[models.Promotion]):
         )
     )
     description = JSON(description="Description of the promotion.")
-    start_date = graphene.DateTime(
-        required=True, description="Start date of the promotion."
-    )
-    end_date = graphene.DateTime(description="End date of the promotion.")
-    created_at = graphene.DateTime(
-        required=True, description="Date time of promotion creation."
-    )
-    updated_at = graphene.DateTime(
+    start_date = DateTime(required=True, description="Start date of the promotion.")
+    end_date = DateTime(description="End date of the promotion.")
+    created_at = DateTime(required=True, description="Date time of promotion creation.")
+    updated_at = DateTime(
         required=True, description="Date time of last update of promotion."
     )
     rules = NonNullList(
@@ -58,8 +54,6 @@ class Promotion(ModelObjectType[models.Promotion]):
         description = (
             "Represents the promotion that allow creating discounts based on given "
             "conditions, and is visible to all the customers."
-            + ADDED_IN_317
-            + PREVIEW_FEATURE
         )
         interfaces = [relay.Node, ObjectWithMetadata]
         model = models.Promotion
@@ -139,7 +133,7 @@ class PromotionRule(ModelObjectType[models.PromotionRule]):
     class Meta:
         description = (
             "Represents the promotion rule that specifies the conditions that must "
-            "be met to apply the promotion discount." + ADDED_IN_317 + PREVIEW_FEATURE
+            "be met to apply the promotion discount."
         )
         interfaces = [relay.Node]
         model = models.PromotionRule
@@ -168,7 +162,9 @@ class PromotionRule(ModelObjectType[models.PromotionRule]):
     def resolve_gift_ids(root: models.PromotionRule, info: ResolveInfo):
         def with_gifts(gifts):
             return [
-                graphene.Node.to_global_id("ProductVariant", gift.pk) for gift in gifts
+                graphene.Node.to_global_id("ProductVariant", gift.pk)
+                for gift in gifts
+                if gift
             ]
 
         return GiftsByPromotionRuleIDLoader(info.context).load(root.id).then(with_gifts)

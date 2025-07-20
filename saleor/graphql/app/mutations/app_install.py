@@ -7,7 +7,7 @@ from ....permission.enums import AppPermission, get_permissions
 from ....webhook.event_types import WebhookEventAsyncType
 from ...core.doc_category import DOC_CATEGORY_APPS
 from ...core.enums import PermissionEnum
-from ...core.mutations import ModelMutation
+from ...core.mutations import DeprecatedModelMutation
 from ...core.types import AppError, BaseInputObjectType, NonNullList
 from ...core.utils import WebhookEventInfo
 from ...decorators import staff_member_required
@@ -39,7 +39,7 @@ class AppInstallInput(BaseInputObjectType):
         ]
 
 
-class AppInstall(ModelMutation):
+class AppInstall(DeprecatedModelMutation):
     class Arguments:
         input = AppInstallInput(
             required=True,
@@ -62,7 +62,6 @@ class AppInstall(ModelMutation):
     def clean_input(cls, info, instance, data, **kwargs):
         manifest_url = data.get("manifest_url")
         clean_manifest_url(manifest_url)
-
         cleaned_input = super().clean_input(info, instance, data, **kwargs)
 
         # clean and prepare permissions

@@ -36,6 +36,28 @@ QUERY_PRODUCT_AND_VARIANTS_ATTRIBUTES = """
               }
               values {
                 slug
+                reference
+                referencedObject {
+                    __typename
+                    ... on Page {
+                        id
+                        publicationDate
+                    }
+                    ... on ProductVariant {
+                        id
+                        created
+                        pricing {
+                            onSale
+                        }
+                    }
+                    ... on Product {
+                        id
+                        created
+                        pricing {
+                            onSale
+                        }
+                    }
+                }
               }
             }
             variants {
@@ -46,6 +68,28 @@ QUERY_PRODUCT_AND_VARIANTS_ATTRIBUTES = """
                 }
                 values {
                   slug
+                  reference
+                  referencedObject {
+                    __typename
+                    ... on Page {
+                        id
+                        publicationDate
+                    }
+                    ... on ProductVariant {
+                        id
+                        created
+                        pricing {
+                            onSale
+                        }
+                    }
+                    ... on Product {
+                        id
+                        created
+                        pricing {
+                            onSale
+                        }
+                    }
+                  }
                 }
               }
             }
@@ -1282,14 +1326,14 @@ def test_sort_attributes_within_product_type(
     )["data"]["productTypeReorderAttributes"]
     assert not content["errors"]
 
-    assert (
-        content["productType"]["id"] == product_type_id
-    ), "Did not return the correct product type"
+    assert content["productType"]["id"] == product_type_id, (
+        "Did not return the correct product type"
+    )
 
     gql_attributes = content["productType"][snake_to_camel_case(relation_field)]
     assert len(gql_attributes) == len(expected_order)
 
-    for attr, expected_pk in zip(gql_attributes, expected_order):
+    for attr, expected_pk in zip(gql_attributes, expected_order, strict=False):
         gql_type, gql_attr_id = graphene.Node.from_global_id(attr["id"])
         assert gql_type == "Attribute"
         assert int(gql_attr_id) == expected_pk
@@ -1400,7 +1444,7 @@ def test_sort_product_attribute_values(
     gql_attribute_values = content["product"]["attributes"][0]["values"]
     assert len(gql_attribute_values) == 3
 
-    for attr, expected_pk in zip(gql_attribute_values, expected_order):
+    for attr, expected_pk in zip(gql_attribute_values, expected_order, strict=False):
         db_type, value_pk = graphene.Node.from_global_id(attr["id"])
         assert db_type == "AttributeValue"
         assert int(value_pk) == expected_pk
@@ -1630,14 +1674,14 @@ def test_sort_product_variant_attribute_values(
     )["data"]["productVariantReorderAttributeValues"]
     assert not content["errors"]
 
-    assert (
-        content["productVariant"]["id"] == variant_id
-    ), "Did not return the correct product variant"
+    assert content["productVariant"]["id"] == variant_id, (
+        "Did not return the correct product variant"
+    )
 
     gql_attribute_values = content["productVariant"]["attributes"][0]["values"]
     assert len(gql_attribute_values) == 3
 
-    for attr, expected_pk in zip(gql_attribute_values, expected_order):
+    for attr, expected_pk in zip(gql_attribute_values, expected_order, strict=False):
         db_type, value_pk = graphene.Node.from_global_id(attr["id"])
         assert db_type == "AttributeValue"
         assert int(value_pk) == expected_pk
@@ -1767,3 +1811,325 @@ def test_sort_product_variant_attribute_values_invalid_value_id(
     assert errors[0]["code"] == ProductErrorCode.NOT_FOUND.name
     assert errors[0]["field"] == "moves"
     assert errors[0]["values"] == [invalid_value_id]
+
+
+def test_product_attribute_with_referenced_page_object(
+    staff_api_client,
+    product_type_page_reference_attribute,
+    permission_manage_products,
+    page,
+    product,
+    channel_USD,
+):
+    # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
+    product_type = product.product_type
+    product_type.product_attributes.all().delete()
+
+    product_type.product_attributes.add(product_type_page_reference_attribute)
+
+    attribute_value = AttributeValue.objects.create(
+        attribute=product_type_page_reference_attribute,
+        name=f"Page {page.pk}",
+        slug=f"page-{page.pk}",
+        reference_page=page,
+    )
+
+    associate_attribute_values_to_instance(
+        product, {product_type_page_reference_attribute.pk: [attribute_value]}
+    )
+
+    query = QUERY_PRODUCT_AND_VARIANTS_ATTRIBUTES
+
+    # when
+    response = staff_api_client.post_graphql(query, {"channel": channel_USD.slug})
+
+    # then
+    content = get_graphql_content(response)
+    products = content["data"]["products"]["edges"]
+    assert len(products) == 1
+
+    product_attributes = products[0]["node"]["attributes"]
+    assert len(product_attributes) == 1
+
+    attribute_with_reference = product_attributes[0]
+    assert attribute_with_reference["attribute"]["slug"] == "page-reference"
+
+    assert len(attribute_with_reference["values"]) == 1
+    value = attribute_with_reference["values"][0]
+    assert value["reference"] == graphene.Node.to_global_id("Page", page.id)
+    assert value["referencedObject"]["__typename"] == "Page"
+    assert value["referencedObject"]["id"] == graphene.Node.to_global_id(
+        "Page", page.id
+    )
+
+
+def test_product_attribute_with_referenced_product_variant_object(
+    staff_api_client,
+    product_type_variant_reference_attribute,
+    permission_manage_products,
+    product,
+    channel_USD,
+):
+    # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
+    product_variant = product.variants.first()
+    product_type = product.product_type
+    product_type.product_attributes.all().delete()
+    product_type.product_attributes.add(product_type_variant_reference_attribute)
+
+    attribute_value = AttributeValue.objects.create(
+        attribute=product_type_variant_reference_attribute,
+        name=f"Variant {product_variant.pk}",
+        slug=f"variant-{product_variant.pk}",
+        reference_variant=product_variant,
+    )
+
+    associate_attribute_values_to_instance(
+        product, {product_type_variant_reference_attribute.pk: [attribute_value]}
+    )
+
+    query = QUERY_PRODUCT_AND_VARIANTS_ATTRIBUTES
+
+    # when
+    response = staff_api_client.post_graphql(query, {"channel": channel_USD.slug})
+
+    # then
+    content = get_graphql_content(response)
+    products = content["data"]["products"]["edges"]
+    assert len(products) == 1
+
+    product_attributes = products[0]["node"]["attributes"]
+    assert len(product_attributes) == 1
+
+    attribute_with_reference = product_attributes[0]
+    assert attribute_with_reference["attribute"]["slug"] == "variant-reference"
+
+    assert len(attribute_with_reference["values"]) == 1
+    value = attribute_with_reference["values"][0]
+    assert value["reference"] == graphene.Node.to_global_id(
+        "ProductVariant", product_variant.id
+    )
+    assert value["referencedObject"]["__typename"] == "ProductVariant"
+    assert value["referencedObject"]["id"] == graphene.Node.to_global_id(
+        "ProductVariant", product_variant.id
+    )
+    # having pricing object means that we passed channel_slug to the variant
+    assert value["referencedObject"]["pricing"]
+
+
+def test_product_attribute_with_referenced_product_object(
+    staff_api_client,
+    product_type_product_reference_attribute,
+    permission_manage_products,
+    product,
+    channel_USD,
+):
+    # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
+    product_type = product.product_type
+    product_type.product_attributes.all().delete()
+    product_type.product_attributes.add(product_type_product_reference_attribute)
+
+    attribute_value = AttributeValue.objects.create(
+        attribute=product_type_product_reference_attribute,
+        name=f"Product {product.pk}",
+        slug=f"product-{product.pk}",
+        reference_product=product,
+    )
+
+    associate_attribute_values_to_instance(
+        product, {product_type_product_reference_attribute.pk: [attribute_value]}
+    )
+
+    query = QUERY_PRODUCT_AND_VARIANTS_ATTRIBUTES
+
+    # when
+    response = staff_api_client.post_graphql(query, {"channel": channel_USD.slug})
+
+    # then
+    content = get_graphql_content(response)
+    products = content["data"]["products"]["edges"]
+    assert len(products) == 1
+
+    product_attributes = products[0]["node"]["attributes"]
+    assert len(product_attributes) == 1
+
+    attribute_with_reference = product_attributes[0]
+    assert attribute_with_reference["attribute"]["slug"] == "product-reference"
+
+    assert len(attribute_with_reference["values"]) == 1
+    value = attribute_with_reference["values"][0]
+    assert value["reference"] == graphene.Node.to_global_id("Product", product.id)
+    assert value["referencedObject"]["__typename"] == "Product"
+    assert value["referencedObject"]["id"] == graphene.Node.to_global_id(
+        "Product", product.id
+    )
+    # having pricing object means that we passed channel_slug to the product
+    assert value["referencedObject"]["pricing"]
+
+
+def test_product_variant_attribute_with_referenced_page_object(
+    staff_api_client,
+    product_type_page_reference_attribute,
+    permission_manage_products,
+    page,
+    product,
+    channel_USD,
+):
+    # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
+    product_variant = product.variants.first()
+    product_type = product.product_type
+    product_type.variant_attributes.all().delete()
+    product_type.variant_attributes.add(product_type_page_reference_attribute)
+
+    attribute_value = AttributeValue.objects.create(
+        attribute=product_type_page_reference_attribute,
+        name=f"Page {page.pk}",
+        slug=f"page-{page.pk}",
+        reference_page=page,
+    )
+
+    associate_attribute_values_to_instance(
+        product_variant, {product_type_page_reference_attribute.pk: [attribute_value]}
+    )
+
+    query = QUERY_PRODUCT_AND_VARIANTS_ATTRIBUTES
+
+    # when
+    response = staff_api_client.post_graphql(query, {"channel": channel_USD.slug})
+
+    # then
+    content = get_graphql_content(response)
+    products = content["data"]["products"]["edges"]
+    assert len(products) == 1
+
+    variant_attributes = products[0]["node"]["variants"][0]["attributes"]
+    assert len(variant_attributes) == 1
+
+    attribute_with_reference = variant_attributes[0]
+    assert attribute_with_reference["attribute"]["slug"] == "page-reference"
+
+    assert len(attribute_with_reference["values"]) == 1
+    value = attribute_with_reference["values"][0]
+    assert value["reference"] == graphene.Node.to_global_id("Page", page.id)
+    assert value["referencedObject"]["__typename"] == "Page"
+    assert value["referencedObject"]["id"] == graphene.Node.to_global_id(
+        "Page", page.id
+    )
+
+
+def test_product_variant_attribute_with_referenced_product_variant_object(
+    staff_api_client,
+    product_type_variant_reference_attribute,
+    permission_manage_products,
+    product,
+    channel_USD,
+):
+    # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
+    product_variant = product.variants.first()
+    product_type = product.product_type
+    product_type.variant_attributes.all().delete()
+    product_type.variant_attributes.add(product_type_variant_reference_attribute)
+
+    attribute_value = AttributeValue.objects.create(
+        attribute=product_type_variant_reference_attribute,
+        name=f"Variant {product_variant.pk}",
+        slug=f"variant-{product_variant.pk}",
+        reference_variant=product_variant,
+    )
+
+    associate_attribute_values_to_instance(
+        product_variant,
+        {product_type_variant_reference_attribute.pk: [attribute_value]},
+    )
+
+    query = QUERY_PRODUCT_AND_VARIANTS_ATTRIBUTES
+
+    # when
+    response = staff_api_client.post_graphql(query, {"channel": channel_USD.slug})
+
+    # then
+    content = get_graphql_content(response)
+    products = content["data"]["products"]["edges"]
+    assert len(products) == 1
+
+    variant_attributes = products[0]["node"]["variants"][0]["attributes"]
+    assert len(variant_attributes) == 1
+
+    attribute_with_reference = variant_attributes[0]
+    assert attribute_with_reference["attribute"]["slug"] == "variant-reference"
+
+    assert len(attribute_with_reference["values"]) == 1
+    value = attribute_with_reference["values"][0]
+
+    assert value["reference"] == graphene.Node.to_global_id(
+        "ProductVariant", product_variant.id
+    )
+    assert value["referencedObject"]["__typename"] == "ProductVariant"
+    assert value["referencedObject"]["id"] == graphene.Node.to_global_id(
+        "ProductVariant", product_variant.id
+    )
+    # having pricing object means that we passed channel_slug to the variant
+    assert value["referencedObject"]["pricing"]
+
+
+def test_product_variant_attribute_with_referenced_product_object(
+    staff_api_client,
+    product_type_product_reference_attribute,
+    permission_manage_products,
+    product,
+    channel_USD,
+):
+    # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
+    product_variant = product.variants.first()
+    product_type = product.product_type
+    product_type.variant_attributes.all().delete()
+    product_type.variant_attributes.add(product_type_product_reference_attribute)
+
+    attribute_value = AttributeValue.objects.create(
+        attribute=product_type_product_reference_attribute,
+        name=f"Product {product.pk}",
+        slug=f"product-{product.pk}",
+        reference_product=product,
+    )
+
+    associate_attribute_values_to_instance(
+        product_variant,
+        {product_type_product_reference_attribute.pk: [attribute_value]},
+    )
+
+    query = QUERY_PRODUCT_AND_VARIANTS_ATTRIBUTES
+
+    # when
+    response = staff_api_client.post_graphql(query, {"channel": channel_USD.slug})
+
+    # then
+    content = get_graphql_content(response)
+    products = content["data"]["products"]["edges"]
+    assert len(products) == 1
+
+    variant_attributes = products[0]["node"]["variants"][0]["attributes"]
+    assert len(variant_attributes) == 1
+
+    attribute_with_reference = variant_attributes[0]
+    assert attribute_with_reference["attribute"]["slug"] == "product-reference"
+
+    assert len(attribute_with_reference["values"]) == 1
+    value = attribute_with_reference["values"][0]
+    assert value["reference"] == graphene.Node.to_global_id("Product", product.id)
+    assert value["referencedObject"]["__typename"] == "Product"
+    assert value["referencedObject"]["id"] == graphene.Node.to_global_id(
+        "Product", product.id
+    )
+    # having pricing object means that we passed channel_slug to the product
+    assert value["referencedObject"]["pricing"]

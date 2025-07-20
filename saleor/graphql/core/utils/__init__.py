@@ -2,7 +2,7 @@ import binascii
 import os
 import secrets
 from dataclasses import dataclass
-from typing import Literal, Optional, Union, overload
+from typing import Literal, NoReturn, overload
 
 import graphene
 from django.conf import settings
@@ -46,7 +46,7 @@ def get_duplicated_values(values):
 @overload
 def from_global_id_or_error(
     global_id: str,
-    only_type: Union[ObjectType, str, None] = None,
+    only_type: ObjectType | str | None = None,
     raise_error: Literal[True] = True,
 ) -> tuple[str, str]: ...
 
@@ -54,14 +54,14 @@ def from_global_id_or_error(
 @overload
 def from_global_id_or_error(
     global_id: str,
-    only_type: Union[type[ObjectType], str, None] = None,
+    only_type: type[ObjectType] | str | None = None,
     raise_error: bool = False,
-) -> Union[tuple[str, str], tuple[str, None]]: ...
+) -> tuple[str, str] | tuple[str, None]: ...
 
 
 def from_global_id_or_error(
     global_id: str,
-    only_type: Union[type[ObjectType], str, None] = None,
+    only_type: type[ObjectType] | str | None = None,
     raise_error: bool = False,
 ):
     """Resolve global ID or raise GraphQLError.
@@ -82,10 +82,12 @@ def from_global_id_or_error(
             id_ = global_id
         else:
             validate_if_int_or_uuid(id_)
-    except (binascii.Error, UnicodeDecodeError, ValueError, ValidationError):
+    except (binascii.Error, UnicodeDecodeError, ValueError, ValidationError) as e:
         if only_type:
-            raise GraphQLError(f"Invalid ID: {global_id}. Expected: {only_type}.")
-        raise GraphQLError(f"Invalid ID: {global_id}.")
+            raise GraphQLError(
+                f"Invalid ID: {global_id}. Expected: {only_type}."
+            ) from e
+        raise GraphQLError(f"Invalid ID: {global_id}.") from e
 
     if only_type and str(type_) != str(only_type):
         if not raise_error:
@@ -97,7 +99,7 @@ def from_global_id_or_error(
 
 
 def from_global_id_or_none(
-    global_id, only_type: Union[ObjectType, str, None] = None, raise_error: bool = False
+    global_id, only_type: ObjectType | str | None = None, raise_error: bool = False
 ):
     if not global_id:
         return None
@@ -121,7 +123,7 @@ def add_hash_to_file_name(file):
     file._name = new_name
 
 
-def raise_validation_error(field=None, message=None, code=None):
+def raise_validation_error(field=None, message=None, code=None) -> NoReturn:
     raise ValidationError({field: ValidationError(message, code=code)})
 
 
@@ -139,18 +141,17 @@ def ext_ref_to_global_id_or_error(
     )
     if internal_id:
         return graphene.Node.to_global_id(model.__name__, internal_id)
-    else:
-        raise_validation_error(
-            field="externalReference",
-            message=f"Couldn't resolve to a node: {external_reference}",
-            code="not_found",
-        )
+    raise_validation_error(
+        field="externalReference",
+        message=f"Couldn't resolve to a node: {external_reference}",
+        code="not_found",
+    )
 
 
 @dataclass
 class WebhookEventInfo:
     type: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 CHECKOUT_CALCULATE_TAXES_MESSAGE = (

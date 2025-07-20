@@ -9,15 +9,9 @@ from ....webhook.event_types import WebhookEventAsyncType
 from ...account.enums import CountryCodeEnum
 from ...core import ResolveInfo
 from ...core.descriptions import (
-    ADDED_IN_31,
-    ADDED_IN_35,
-    ADDED_IN_37,
-    ADDED_IN_312,
-    ADDED_IN_313,
-    ADDED_IN_314,
-    ADDED_IN_315,
-    ADDED_IN_316,
     ADDED_IN_318,
+    ADDED_IN_320,
+    ADDED_IN_321,
     DEPRECATED_IN_3X_INPUT,
     PREVIEW_FEATURE,
 )
@@ -28,12 +22,12 @@ from ...core.doc_category import (
     DOC_CATEGORY_PAYMENTS,
     DOC_CATEGORY_PRODUCTS,
 )
-from ...core.mutations import ModelMutation
-from ...core.scalars import Day, Minute
+from ...core.mutations import DeprecatedModelMutation
+from ...core.scalars import DateTime, Day, Hour, Minute
 from ...core.types import BaseInputObjectType, ChannelError, NonNullList
 from ...core.types import common as common_types
 from ...core.utils import WebhookEventInfo
-from ...meta.inputs import MetadataInput
+from ...meta.inputs import MetadataInput, MetadataInputDescription
 from ...plugins.dataloaders import get_plugin_manager_promise
 from ..enums import (
     AllocationStrategyEnum,
@@ -72,9 +66,20 @@ class CheckoutSettingsInput(BaseInputObjectType):
             "Some of the `problems` can block the finalizing checkout process. "
             "The legacy flow will be removed in Saleor 4.0. "
             "The flow with `checkout.problems` will be the default one. "
-            + ADDED_IN_315
             + DEPRECATED_IN_3X_INPUT
         )
+    )
+    automatically_complete_fully_paid_checkouts = graphene.Boolean(
+        description=(
+            "Default `false`. Determines if the paid checkouts should be automatically "
+            "completed. This setting applies only to checkouts where payment "
+            "was processed through transactions."
+            "When enabled, the checkout will be automatically completed once the "
+            "checkout `charge_status` reaches `FULL`. This occurs when the total sum "
+            "of charged and authorized transaction amounts equals or exceeds the "
+            "checkout's total amount."
+        )
+        + ADDED_IN_320,
     )
 
     class Meta:
@@ -98,14 +103,14 @@ class OrderSettingsInput(BaseInputObjectType):
         description=(
             "Expiration time in minutes. "
             "Default null - means do not expire any orders. "
-            "Enter 0 or null to disable." + ADDED_IN_313 + PREVIEW_FEATURE
+            "Enter 0 or null to disable."
         ),
     )
     delete_expired_orders_after = Day(
         required=False,
         description=(
             "The time in days after expired orders will be deleted."
-            "Allowed range is from 1 to 120." + ADDED_IN_314 + PREVIEW_FEATURE
+            "Allowed range is from 1 to 120."
         ),
     )
     mark_as_paid_strategy = MarkAsPaidStrategyEnum(
@@ -116,15 +121,13 @@ class OrderSettingsInput(BaseInputObjectType):
             "and attached to the order when it's manually marked as paid."
             "\n`PAYMENT_FLOW` - [default option] creates the `Payment` object."
             "\n`TRANSACTION_FLOW` - creates the `TransactionItem` object."
-            + ADDED_IN_313
-            + PREVIEW_FEATURE
         ),
     )
     allow_unpaid_orders = graphene.Boolean(
         required=False,
         description=(
             "Determine if it is possible to place unpaid order by calling "
-            "`checkoutComplete` mutation." + ADDED_IN_315 + PREVIEW_FEATURE
+            "`checkoutComplete` mutation."
         ),
     )
     include_draft_order_in_voucher_usage = graphene.Boolean(
@@ -138,6 +141,34 @@ class OrderSettingsInput(BaseInputObjectType):
             + PREVIEW_FEATURE
         ),
     )
+    draft_order_line_price_freeze_period = Hour(
+        required=False,
+        description=(
+            "Time in hours after which the draft order line price will be refreshed. "
+            "Default value is 24 hours. "
+            "Enter 0 or null to disable." + ADDED_IN_321 + PREVIEW_FEATURE
+        ),
+    )
+
+    use_legacy_line_discount_propagation = graphene.Boolean(
+        required=False,
+        description=(
+            "This flag only affects orders created from checkout and applies "
+            "specifically to vouchers of the types: `SPECIFIC_PRODUCT` and "
+            "`ENTIRE_ORDER` with `applyOncePerOrder` enabled."
+            "\n- When legacy propagation is enabled, discounts from these "
+            "vouchers are represented as `OrderDiscount` objects, attached to "
+            "the order and returned in the `Order.discounts` field. "
+            "Additionally, percentage-based vouchers are converted to "
+            "fixed-value discounts."
+            "\n- When legacy propagation is disabled, discounts are represented "
+            "as `OrderLineDiscount` objects, attached to individual lines and "
+            "returned in the `OrderLine.discounts` field. In this case, "
+            "percentage-based vouchers retain their original type."
+            "\nIn future releases, `OrderLineDiscount` will become the default "
+            "behavior, and this flag will be deprecated and removed." + ADDED_IN_321
+        ),
+    )
 
     class Meta:
         doc_category = DOC_CATEGORY_ORDERS
@@ -149,7 +180,30 @@ class PaymentSettingsInput(BaseInputObjectType):
         description=(
             "Determine the transaction flow strategy to be used. "
             "Include the selected option in the payload sent to the payment app, as a "
-            "requested action for the transaction." + ADDED_IN_316 + PREVIEW_FEATURE
+            "requested action for the transaction."
+        ),
+    )
+    release_funds_for_expired_checkouts = graphene.Boolean(
+        required=False,
+        description=(
+            "Determine if the funds for expired checkouts should be released automatically."
+            + ADDED_IN_320
+        ),
+    )
+    checkout_ttl_before_releasing_funds = Hour(
+        required=False,
+        description=(
+            "The time in hours after which funds for expired checkouts will be released."
+            + ADDED_IN_320
+        ),
+    )
+    checkout_release_funds_cut_off_date = DateTime(
+        required=False,
+        description=(
+            "Specifies the earliest date on which funds for expired checkouts can begin "
+            "to be released. Expired checkouts dated before this cut-off will not have their "
+            "funds released. Additionally, no funds will be released for checkouts that are "
+            "more than one year old, regardless of the cut-off date." + ADDED_IN_320
         ),
     )
 
@@ -163,7 +217,7 @@ class ChannelInput(BaseInputObjectType):
     )
     stock_settings = graphene.Field(
         StockSettingsInput,
-        description=("The channel stock settings." + ADDED_IN_37),
+        description="The channel stock settings.",
         required=False,
     )
     add_shipping_zones = NonNullList(
@@ -173,33 +227,36 @@ class ChannelInput(BaseInputObjectType):
     )
     add_warehouses = NonNullList(
         graphene.ID,
-        description="List of warehouses to assign to the channel." + ADDED_IN_35,
+        description="List of warehouses to assign to the channel.",
         required=False,
     )
     order_settings = graphene.Field(
         OrderSettingsInput,
-        description="The channel order settings" + ADDED_IN_312,
+        description="The channel order settings",
         required=False,
     )
     metadata = common_types.NonNullList(
         MetadataInput,
-        description="Channel public metadata." + ADDED_IN_315,
+        description=(
+            f"Channel public metadata. {MetadataInputDescription.PUBLIC_METADATA_INPUT}"
+        ),
         required=False,
     )
     private_metadata = common_types.NonNullList(
         MetadataInput,
-        description="Channel private metadata." + ADDED_IN_315,
+        description="Channel private metadata. "
+        f"{MetadataInputDescription.PRIVATE_METADATA_INPUT}",
         required=False,
     )
 
     checkout_settings = graphene.Field(
         CheckoutSettingsInput,
-        description="The channel checkout settings" + ADDED_IN_315 + PREVIEW_FEATURE,
+        description="The channel checkout settings",
         required=False,
     )
     payment_settings = graphene.Field(
         PaymentSettingsInput,
-        description="The channel payment settings" + ADDED_IN_316 + PREVIEW_FEATURE,
+        description="The channel payment settings",
         required=False,
     )
 
@@ -217,7 +274,7 @@ class ChannelCreateInput(ChannelInput):
         description=(
             "Default country for the channel. Default country can be "
             "used in checkout to determine the stock quantities or calculate taxes "
-            "when the country was not explicitly provided." + ADDED_IN_31
+            "when the country was not explicitly provided."
         ),
         required=True,
     )
@@ -226,7 +283,7 @@ class ChannelCreateInput(ChannelInput):
         doc_category = DOC_CATEGORY_CHANNELS
 
 
-class ChannelCreate(ModelMutation):
+class ChannelCreate(DeprecatedModelMutation):
     class Arguments:
         input = ChannelCreateInput(
             required=True, description="Fields required to create channel."
@@ -260,8 +317,11 @@ class ChannelCreate(ModelMutation):
             cleaned_input["slug"] = slugify(slug)
         if stock_settings := cleaned_input.get("stock_settings"):
             cleaned_input["allocation_strategy"] = stock_settings["allocation_strategy"]
-        if order_settings := cleaned_input.get("order_settings"):
-            clean_input_order_settings(order_settings, cleaned_input, instance)
+
+        order_settings = cleaned_input.get("order_settings") or {
+            "use_legacy_line_discount_propagation_for_order": False
+        }
+        clean_input_order_settings(order_settings, cleaned_input, instance)
 
         if checkout_settings := cleaned_input.get("checkout_settings"):
             clean_input_checkout_settings(checkout_settings, cleaned_input)

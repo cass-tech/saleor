@@ -1,4 +1,4 @@
-from datetime import timedelta
+import datetime
 from decimal import Decimal
 from unittest.mock import ANY, patch
 
@@ -76,8 +76,8 @@ def test_promotion_create_by_staff_user(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
     rule_2_channel_ids = [graphene.Node.to_global_id("Channel", channel_PLN.pk)]
@@ -108,7 +108,7 @@ def test_promotion_create_by_staff_user(
     }
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type_1 = RewardValueTypeEnum.FIXED.name
     reward_value_type_2 = RewardValueTypeEnum.PERCENTAGE.name
     promotion_type = PromotionTypeEnum.CATALOGUE.name
@@ -193,8 +193,8 @@ def test_promotion_create_by_app(
     product,
 ):
     # given
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
     channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
     promotion_name = "test promotion"
     catalogue_predicate = {
@@ -215,6 +215,7 @@ def test_promotion_create_by_app(
     variables = {
         "input": {
             "name": promotion_name,
+            "type": PromotionTypeEnum.CATALOGUE.name,
             "description": description_json,
             "startDate": start_date.isoformat(),
             "endDate": end_date.isoformat(),
@@ -224,7 +225,7 @@ def test_promotion_create_by_app(
                     "description": description_json,
                     "channels": channel_ids,
                     "rewardValueType": RewardValueTypeEnum.FIXED.name,
-                    "rewardValue": Decimal("10"),
+                    "rewardValue": Decimal(10),
                     "cataloguePredicate": catalogue_predicate,
                 }
             ],
@@ -273,8 +274,8 @@ def test_promotion_create_by_customer(
     category,
 ):
     # given
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
     channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
     promotion_name = "test promotion"
     catalogue_predicate = {
@@ -296,7 +297,7 @@ def test_promotion_create_by_customer(
                     "description": description_json,
                     "channels": channel_ids,
                     "rewardValueType": RewardValueTypeEnum.FIXED.name,
-                    "rewardValue": Decimal("10"),
+                    "rewardValue": Decimal(10),
                     "cataloguePredicate": catalogue_predicate,
                 }
             ],
@@ -325,15 +326,15 @@ def test_promotion_create_with_order_rule(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     order_predicate = {
         "discountedObjectPredicate": {"baseSubtotalPrice": {"range": {"gte": 100}}}
     }
     rule_name = "test promotion rule 1"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type = RewardValueTypeEnum.FIXED.name
     reward_type = RewardTypeEnum.SUBTOTAL_DISCOUNT.name
     channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
@@ -387,8 +388,8 @@ def test_promotion_create_fixed_reward_value_multiple_currencies(
     product,
 ):
     # given
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
     channel_ids = [
         graphene.Node.to_global_id("Channel", channel.pk)
         for channel in [channel_USD, channel_PLN]
@@ -422,7 +423,7 @@ def test_promotion_create_fixed_reward_value_multiple_currencies(
                     "description": description_json,
                     "channels": channel_ids,
                     "rewardValueType": RewardValueTypeEnum.FIXED.name,
-                    "rewardValue": Decimal("10"),
+                    "rewardValue": Decimal(10),
                     "cataloguePredicate": catalogue_predicate,
                 }
             ],
@@ -458,8 +459,8 @@ def test_promotion_create_invalid_price_precision(
     product,
 ):
     # given
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
     channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
 
     promotion_name = "test promotion"
@@ -525,8 +526,8 @@ def test_promotion_create_invalid_percentage_value(
     product,
 ):
     # given
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
     channel_ids = [
         graphene.Node.to_global_id("Channel", channel.pk)
         for channel in [channel_USD, channel_PLN]
@@ -560,7 +561,7 @@ def test_promotion_create_invalid_percentage_value(
                     "description": description_json,
                     "channels": channel_ids,
                     "rewardValueType": RewardValueTypeEnum.PERCENTAGE.name,
-                    "rewardValue": Decimal("101"),
+                    "rewardValue": Decimal(101),
                     "cataloguePredicate": catalogue_predicate,
                 }
             ],
@@ -598,12 +599,13 @@ def test_promotion_create_only_name_and_end_date(
     product,
 ):
     # given
-    end_date = timezone.now() + timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
     promotion_name = "test promotion"
 
     variables = {
         "input": {
             "name": promotion_name,
+            "type": PromotionTypeEnum.CATALOGUE.name,
             "endDate": end_date.isoformat(),
         }
     }
@@ -649,8 +651,8 @@ def test_promotion_create_start_date_and_end_date_after_current_date(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() + timedelta(days=10)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() + datetime.timedelta(days=10)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
     rule_2_channel_ids = [graphene.Node.to_global_id("Channel", channel_PLN.pk)]
@@ -681,7 +683,7 @@ def test_promotion_create_start_date_and_end_date_after_current_date(
     }
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type_1 = RewardValueTypeEnum.FIXED.name
     reward_value_type_2 = RewardValueTypeEnum.PERCENTAGE.name
     promotion_type = PromotionTypeEnum.CATALOGUE.name
@@ -763,8 +765,8 @@ def test_promotion_create_missing_predicate(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     catalogue_predicate = {
@@ -773,7 +775,7 @@ def test_promotion_create_missing_predicate(
 
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type_1 = RewardValueTypeEnum.FIXED.name
     reward_value_type_2 = RewardValueTypeEnum.PERCENTAGE.name
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
@@ -839,8 +841,8 @@ def test_promotion_create_missing_reward_value(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     catalogue_predicate = {
@@ -849,7 +851,7 @@ def test_promotion_create_missing_reward_value(
 
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type_1 = RewardValueTypeEnum.FIXED.name
     reward_value_type_2 = RewardValueTypeEnum.PERCENTAGE.name
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
@@ -908,8 +910,8 @@ def test_promotion_create_missing_reward_value_type(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     catalogue_predicate = {
@@ -918,7 +920,7 @@ def test_promotion_create_missing_reward_value_type(
 
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
     rule_2_channel_ids = [graphene.Node.to_global_id("Channel", channel_PLN.pk)]
 
@@ -957,10 +959,10 @@ def test_promotion_create_missing_reward_value_type(
 
     assert not data["promotion"]
     assert len(errors) == 2
-    error_fields = set([error["field"] for error in errors])
+    error_fields = {error["field"] for error in errors}
     assert len(error_fields) == 1
     assert "rewardValueType" in error_fields
-    error_codes = set([error["code"] for error in errors])
+    error_codes = {error["code"] for error in errors}
     assert len(error_codes) == 1
     assert PromotionCreateErrorCode.REQUIRED.name in error_codes
 
@@ -976,8 +978,8 @@ def test_promotion_create_invalid_channel_id(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     catalogue_predicate = {
@@ -986,7 +988,7 @@ def test_promotion_create_invalid_channel_id(
 
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type_1 = RewardValueTypeEnum.FIXED.name
     reward_value_type_2 = RewardValueTypeEnum.PERCENTAGE.name
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", -1)]
@@ -1048,8 +1050,8 @@ def test_promotion_create_mixed_catalogue_and_order_rules(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
     rule_2_channel_ids = [graphene.Node.to_global_id("Channel", channel_PLN.pk)]
@@ -1062,7 +1064,7 @@ def test_promotion_create_mixed_catalogue_and_order_rules(
     }
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type_1 = RewardValueTypeEnum.FIXED.name
     reward_value_type_2 = RewardValueTypeEnum.PERCENTAGE.name
 
@@ -1137,15 +1139,15 @@ def test_promotion_create_mixed_currencies_for_price_based_predicate(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     order_predicate = {
         "discountedObjectPredicate": {"baseSubtotalPrice": {"range": {"gte": 100}}}
     }
     rule_name = "test promotion rule 1"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type = RewardValueTypeEnum.PERCENTAGE.name
     reward_type = RewardTypeEnum.SUBTOTAL_DISCOUNT.name
     channel_ids = [
@@ -1201,8 +1203,8 @@ def test_promotion_create_multiple_errors(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     channel_ids = [graphene.Node.to_global_id("Channel", -1)]
     promotion_name = "test promotion"
@@ -1285,8 +1287,8 @@ def test_promotion_create_end_date_before_start_date(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() + timedelta(days=30)
-    end_date = timezone.now() - timedelta(days=30)
+    start_date = timezone.now() + datetime.timedelta(days=30)
+    end_date = timezone.now() - datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     catalogue_predicate = {
@@ -1295,7 +1297,7 @@ def test_promotion_create_end_date_before_start_date(
 
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type_1 = RewardValueTypeEnum.FIXED.name
     reward_value_type_2 = RewardValueTypeEnum.PERCENTAGE.name
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
@@ -1356,8 +1358,8 @@ def test_promotion_create_invalid_catalogue_predicate(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     rule_1_channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
     rule_2_channel_ids = [graphene.Node.to_global_id("Channel", channel_PLN.pk)]
@@ -1389,7 +1391,7 @@ def test_promotion_create_invalid_catalogue_predicate(
     }
     rule_1_name = "test promotion rule 1"
     rule_2_name = "test promotion rule 2"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type_1 = RewardValueTypeEnum.FIXED.name
     reward_value_type_2 = RewardValueTypeEnum.PERCENTAGE.name
 
@@ -1446,15 +1448,15 @@ def test_promotion_create_exceeds_rules_number_limit(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     order_predicate = {
         "discountedObjectPredicate": {"baseSubtotalPrice": {"range": {"gte": 100}}}
     }
     rule_name = "test promotion rule 1"
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     reward_value_type = RewardValueTypeEnum.PERCENTAGE.name
     reward_type = RewardTypeEnum.SUBTOTAL_DISCOUNT.name
     channel_id = graphene.Node.to_global_id("Channel", channel_USD.pk)
@@ -1506,8 +1508,8 @@ def test_promotion_create_exceeds_gifts_number_limit(
     # given
     gift_limit = 1
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     promotion_name = "test promotion"
     order_predicate = {
@@ -1569,8 +1571,8 @@ def test_promotion_create_rules_without_channels_and_percentage_reward(
 ):
     # given
     permission_group_manage_discounts.user_set.add(staff_api_client.user)
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
 
     catalogue_predicate = {
         "variantPredicate": {
@@ -1580,13 +1582,14 @@ def test_promotion_create_rules_without_channels_and_percentage_reward(
     variables = {
         "input": {
             "name": "test promotion",
+            "type": PromotionTypeEnum.CATALOGUE.name,
             "startDate": start_date.isoformat(),
             "endDate": end_date.isoformat(),
             "rules": [
                 {
                     "name": "test promotion rule 1",
                     "rewardValueType": RewardValueTypeEnum.PERCENTAGE.name,
-                    "rewardValue": Decimal("10"),
+                    "rewardValue": Decimal(10),
                     "cataloguePredicate": catalogue_predicate,
                 }
             ],
@@ -1670,13 +1673,13 @@ def test_promotion_create_events_by_staff_user(
                     "channels": rule_1_channel_ids,
                     "cataloguePredicate": catalogue_predicate,
                     "rewardValueType": RewardValueTypeEnum.FIXED.name,
-                    "rewardValue": Decimal("1"),
+                    "rewardValue": Decimal(1),
                 },
                 {
                     "channels": rule_2_channel_ids,
                     "cataloguePredicate": catalogue_predicate,
                     "rewardValueType": RewardValueTypeEnum.FIXED.name,
-                    "rewardValue": Decimal("1"),
+                    "rewardValue": Decimal(1),
                 },
             ],
         }
@@ -1710,7 +1713,7 @@ def test_promotion_create_events_by_staff_user(
 
     rule_ids = [event["ruleId"] for event in events if event.get("ruleId")]
     rules = data["promotion"]["rules"]
-    assert all([rule["id"] in rule_ids for rule in rules])
+    assert all(rule["id"] in rule_ids for rule in rules)
 
 
 def test_promotion_create_events_by_app(
@@ -1743,13 +1746,13 @@ def test_promotion_create_events_by_app(
                     "channels": rule_1_channel_ids,
                     "cataloguePredicate": catalogue_predicate,
                     "rewardValueType": RewardValueTypeEnum.FIXED.name,
-                    "rewardValue": Decimal("1"),
+                    "rewardValue": Decimal(1),
                 },
                 {
                     "channels": rule_2_channel_ids,
                     "cataloguePredicate": catalogue_predicate,
                     "rewardValueType": RewardValueTypeEnum.FIXED.name,
-                    "rewardValue": Decimal("1"),
+                    "rewardValue": Decimal(1),
                 },
             ],
         }
@@ -1783,7 +1786,7 @@ def test_promotion_create_events_by_app(
 
     rule_ids = [event["ruleId"] for event in events if event.get("ruleId")]
     rules = data["promotion"]["rules"]
-    assert all([rule["id"] in rule_ids for rule in rules])
+    assert all(rule["id"] in rule_ids for rule in rules)
 
 
 @patch("saleor.product.tasks.update_products_discounted_prices_of_promotion_task.delay")
@@ -1844,7 +1847,7 @@ def test_promotion_create_gift_promotion(
     promotion = Promotion.objects.filter(name=promotion_name).get()
     rules = promotion.rules.all()
     assert len(rules) == 1
-    assert all([gift in product_variant_list for gift in rules[0].gifts.all()])
+    assert all(gift in product_variant_list for gift in rules[0].gifts.all())
     assert rules[0].reward_type == RewardTypeEnum.GIFT.value
 
 
@@ -1914,7 +1917,7 @@ def test_promotion_create_gift_promotion_with_reward_value(
     }
     rule_name = "test gift promotion rule"
     reward_type = RewardTypeEnum.GIFT.name
-    reward_value = Decimal("10")
+    reward_value = Decimal(10)
     channel_ids = [graphene.Node.to_global_id("Channel", channel_USD.pk)]
     gift_ids = [
         graphene.Node.to_global_id("ProductVariant", variant.pk)
@@ -2063,8 +2066,8 @@ def test_promotion_create_without_catalogue_predicate(
     product,
 ):
     # given
-    start_date = timezone.now() - timedelta(days=30)
-    end_date = timezone.now() + timedelta(days=30)
+    start_date = timezone.now() - datetime.timedelta(days=30)
+    end_date = timezone.now() + datetime.timedelta(days=30)
     channel_ids = [
         graphene.Node.to_global_id("Channel", channel.pk)
         for channel in [channel_USD, channel_PLN]
@@ -2073,6 +2076,7 @@ def test_promotion_create_without_catalogue_predicate(
     variables = {
         "input": {
             "name": promotion_name,
+            "type": PromotionTypeEnum.CATALOGUE.name,
             "description": description_json,
             "startDate": start_date.isoformat(),
             "endDate": end_date.isoformat(),
@@ -2082,7 +2086,7 @@ def test_promotion_create_without_catalogue_predicate(
                     "description": description_json,
                     "channels": channel_ids,
                     "rewardValueType": RewardValueTypeEnum.PERCENTAGE.name,
-                    "rewardValue": Decimal("50"),
+                    "rewardValue": Decimal(50),
                     "cataloguePredicate": None,
                 }
             ],

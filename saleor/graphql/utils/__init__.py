@@ -2,7 +2,7 @@ import hashlib
 import logging
 import traceback
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import graphene
@@ -17,10 +17,7 @@ from jwt import InvalidTokenError
 
 from ...account.models import User
 from ...app.models import App
-from ...core.exceptions import (
-    CircularSubscriptionSyncEvent,
-    PermissionDenied,
-)
+from ...core.exceptions import CircularSubscriptionSyncEvent, PermissionDenied
 from ..core.enums import PermissionEnum
 from ..core.types import TYPES_WITH_DOUBLE_ID_AVAILABLE, Permission
 from ..core.utils import from_global_id_or_error
@@ -51,6 +48,12 @@ ALLOWED_ERRORS = [
     QueryCostError,
 ]
 
+AVAILABLE_SOURCE_SERVICE_NAMES_FOR_SPAN_TAG = {
+    "saleor.dashboard",
+    "saleor.dashboard.playground",
+    "saleor.playground",
+}
+
 INTERNAL_ERROR_MESSAGE = "Internal Server Error"
 
 
@@ -58,7 +61,7 @@ def resolve_global_ids_to_primary_keys(
     ids: Iterable[str], graphene_type=None, raise_error: bool = False
 ):
     pks = []
-    invalid_ids = []
+    invalid_ids: list[str] = []
     used_type = graphene_type
 
     for graphql_id in ids:
@@ -96,7 +99,7 @@ def _resolve_graphene_type(schema, type_name):
 
 def get_nodes(
     ids,
-    graphene_type: Union[graphene.ObjectType, str, None] = None,
+    graphene_type: graphene.ObjectType | str | None = None,
     model=None,
     qs=None,
     schema=None,
@@ -143,9 +146,9 @@ def get_nodes(
         old_id_field = "number" if str(graphene_type) == "Order" else "old_id"
         nodes_pk_list.extend([str(getattr(node, old_id_field)) for node in nodes])
     for pk in pks:
-        assert (
-            pk in nodes_pk_list
-        ), f"There is no node of type {graphene_type} with pk {pk}"
+        assert pk in nodes_pk_list, (
+            f"There is no node of type {graphene_type} with pk {pk}"
+        )
     return nodes
 
 
@@ -193,7 +196,7 @@ def format_permissions_for_display(permissions):
     return formatted_permissions
 
 
-def get_user_or_app_from_context(context: "SaleorContext") -> Union[App, User, None]:
+def get_user_or_app_from_context(context: "SaleorContext") -> App | User | None:
     # order is important
     # app can be None but user if None then is passed as anonymous
     return context.app or context.user
@@ -205,7 +208,7 @@ def requestor_is_superuser(requestor):
 
 
 def query_identifier(document: GraphQLDocument) -> str:
-    """Generate a fingerprint for a GraphQL query.
+    """Generate a identifier for a GraphQL query.
 
     For queries identifier is sorted set of all root objects separated by `,`.
     e.g
@@ -269,7 +272,7 @@ def query_fingerprint(document: GraphQLDocument) -> str:
     return f"{label}:{query_hash}"
 
 
-def format_error(error, handled_exceptions):
+def format_error(error, handled_exceptions, query=None):
     result: dict[str, Any]
     if isinstance(error, GraphQLError):
         result = format_graphql_error(error)
@@ -284,8 +287,10 @@ def format_error(error, handled_exceptions):
         exc = exc.original_error
     if isinstance(exc, AssertionError):
         exc = GraphQLError(str(exc))
+    if query:
+        exc._exc_query = query
     if isinstance(exc, handled_exceptions):
-        handled_errors_logger.info("A query had an error", exc_info=exc)
+        handled_errors_logger.debug("A query had an error", exc_info=exc)
     else:
         unhandled_errors_logger.error("A query failed unexpectedly", exc_info=exc)
 
@@ -293,7 +298,7 @@ def format_error(error, handled_exceptions):
     # the API. This prevents from leaking internals that might be included in Python
     # exceptions' error messages.
     is_allowed_err = type(exc) in ALLOWED_ERRORS or any(
-        [isinstance(exc, allowed_err) for allowed_err in ALLOWED_ERRORS]
+        isinstance(exc, allowed_err) for allowed_err in ALLOWED_ERRORS
     )
     if not is_allowed_err and not settings.DEBUG:
         result["message"] = INTERNAL_ERROR_MESSAGE
@@ -307,3 +312,12 @@ def format_error(error, handled_exceptions):
                 lines.extend(line.rstrip().splitlines())
         result["extensions"]["exception"]["stacktrace"] = lines
     return result
+
+
+def get_source_service_name_value(header_source: str | None) -> str | None:
+    default_value = "unknown_service"
+    if not header_source:
+        return default_value
+    if header_source.lower() in AVAILABLE_SOURCE_SERVICE_NAMES_FOR_SPAN_TAG:
+        return header_source.lower()
+    return default_value

@@ -3,13 +3,19 @@ from decimal import Decimal
 
 from prices import Money, TaxedMoney
 
+TAX_ERROR_FIELD_LENGTH = 255
+
 
 class TaxError(Exception):
     """Default tax error."""
 
 
-class TaxEmptyData(Exception):
-    """Empty tax data received from Tax App error."""
+class TaxDataError(Exception):
+    """Error in tax data received from tax app or plugin."""
+
+    def __init__(self, message: str, errors: list | None = None):
+        super().__init__(message)
+        self.errors = errors or []
 
 
 def zero_money(currency: str) -> Money:
@@ -46,3 +52,12 @@ class TaxData:
     shipping_price_net_amount: Decimal
     shipping_tax_rate: Decimal
     lines: list[TaxLineData]
+
+
+class TaxDataErrorMessage:
+    EMPTY = "Empty tax data."
+    NEGATIVE_VALUE = "Tax data contains negative values."
+    LINE_NUMBER = (
+        "Number of lines from tax data doesn't match the line number from order."
+    )
+    OVERFLOW = "Tax data contains prices exceeding a billion or tax rate over 100%."

@@ -44,16 +44,21 @@ def test_fulfillment_approve(
     mock_email_fulfillment,
     mock_fulfillment_approved,
     staff_api_client,
-    fulfillment,
+    full_fulfillment_awaiting_approval,
     permission_group_manage_orders,
 ):
+    # given
     permission_group_manage_orders.user_set.add(staff_api_client.user)
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
+    fulfillment = full_fulfillment_awaiting_approval
+
     query = APPROVE_FULFILLMENT_MUTATION
     fulfillment_id = graphene.Node.to_global_id("Fulfillment", fulfillment.id)
     variables = {"id": fulfillment_id, "notifyCustomer": True}
+
+    # when
     response = staff_api_client.post_graphql(query, variables)
+
+    # then
     content = get_graphql_content(response)
     data = content["data"]["orderFulfillmentApprove"]
     assert not data["errors"]
@@ -73,18 +78,16 @@ def test_fulfillment_approve(
 
 def test_fulfillment_approve_by_user_no_channel_access(
     staff_api_client,
-    fulfillment,
+    partial_fulfillment_awaiting_approval,
     permission_group_all_perms_channel_USD_only,
     channel_PLN,
 ):
     # given
     permission_group_all_perms_channel_USD_only.user_set.add(staff_api_client.user)
+    fulfillment = partial_fulfillment_awaiting_approval
     order = fulfillment.order
     order.channel = channel_PLN
     order.save(update_fields=["channel"])
-
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
 
     query = APPROVE_FULFILLMENT_MUTATION
     fulfillment_id = graphene.Node.to_global_id("Fulfillment", fulfillment.id)
@@ -103,12 +106,11 @@ def test_fulfillment_approve_by_app(
     mock_email_fulfillment,
     mock_fulfillment_approved,
     app_api_client,
-    fulfillment,
+    full_fulfillment_awaiting_approval,
     permission_manage_orders,
 ):
     # given
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
+    fulfillment = full_fulfillment_awaiting_approval
     query = APPROVE_FULFILLMENT_MUTATION
     fulfillment_id = graphene.Node.to_global_id("Fulfillment", fulfillment.id)
     variables = {"id": fulfillment_id, "notifyCustomer": True}
@@ -141,12 +143,11 @@ def test_fulfillment_approve_by_app(
 def test_fulfillment_approve_delete_products_before_approval_allow_stock_exceeded_true(
     mock_email_fulfillment,
     staff_api_client,
-    fulfillment,
+    full_fulfillment_awaiting_approval,
     permission_group_manage_orders,
 ):
     permission_group_manage_orders.user_set.add(staff_api_client.user)
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
+    fulfillment = full_fulfillment_awaiting_approval
 
     Product.objects.all().delete()
 
@@ -180,12 +181,13 @@ def test_fulfillment_approve_delete_products_before_approval_allow_stock_exceede
     mock_email_fulfillment,
     mock_fulfillment_approved,
     staff_api_client,
-    fulfillment,
+    partial_fulfillment_awaiting_approval,
     permission_group_manage_orders,
+    django_capture_on_commit_callbacks,
 ):
+    # given
     permission_group_manage_orders.user_set.add(staff_api_client.user)
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
+    fulfillment = partial_fulfillment_awaiting_approval
 
     Product.objects.all().delete()
 
@@ -196,8 +198,12 @@ def test_fulfillment_approve_delete_products_before_approval_allow_stock_exceede
         "notifyCustomer": True,
         "allowStockToBeExceeded": False,
     }
-    response = staff_api_client.post_graphql(query, variables)
 
+    # when
+    with django_capture_on_commit_callbacks(execute=True):
+        response = staff_api_client.post_graphql(query, variables)
+
+    # then
     content = get_graphql_content(response)
     errors = content["data"]["orderFulfillmentApprove"]["errors"]
 
@@ -222,7 +228,7 @@ def test_fulfillment_approve_delete_products_before_approval_allow_stock_exceede
     fulfillment.refresh_from_db()
     assert fulfillment.status == FulfillmentStatus.WAITING_FOR_APPROVAL
 
-    assert mock_email_fulfillment.call_count == 1
+    mock_email_fulfillment.assert_not_called()
     events = fulfillment.order.events.all()
     assert len(events) == 0
     mock_fulfillment_approved.assert_not_called()
@@ -232,14 +238,13 @@ def test_fulfillment_approve_delete_products_before_approval_allow_stock_exceede
 def test_fulfillment_approve_gift_cards_created(
     mock_email_fulfillment,
     staff_api_client,
-    fulfillment,
+    full_fulfillment_awaiting_approval,
     permission_group_manage_orders,
     gift_card_shippable_order_line,
     gift_card_non_shippable_order_line,
 ):
     permission_group_manage_orders.user_set.add(staff_api_client.user)
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
+    fulfillment = full_fulfillment_awaiting_approval
 
     gift_card_line_1 = gift_card_shippable_order_line
     gift_card_line_2 = gift_card_non_shippable_order_line
@@ -301,17 +306,18 @@ def test_fulfillment_approve_gift_cards_created(
 def test_fulfillment_approve_when_stock_is_exceeded_and_flag_enabled(
     mock_email_fulfillment,
     staff_api_client,
-    fulfillment,
+    full_fulfillment_awaiting_approval,
     permission_group_manage_orders,
 ):
     # make stocks exceeded
     permission_group_manage_orders.user_set.add(staff_api_client.user)
-    for stock in [line.stock for line in fulfillment.lines.all()]:
+    for stock in [
+        line.stock for line in full_fulfillment_awaiting_approval.lines.all()
+    ]:
         stock.quantity = -99
         stock.save()
 
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
+    fulfillment = full_fulfillment_awaiting_approval
     query = APPROVE_FULFILLMENT_MUTATION
     fulfillment_id = graphene.Node.to_global_id("Fulfillment", fulfillment.id)
 
@@ -342,17 +348,18 @@ def test_fulfillment_approve_when_stock_is_exceeded_and_flag_enabled(
 def test_fulfillment_approve_when_stock_is_exceeded_and_flag_disabled(
     mock_email_fulfillment,
     staff_api_client,
-    fulfillment,
+    full_fulfillment_awaiting_approval,
     permission_group_manage_orders,
 ):
     # make stocks exceeded
     permission_group_manage_orders.user_set.add(staff_api_client.user)
-    for stock in [line.stock for line in fulfillment.lines.all()]:
+    for stock in [
+        line.stock for line in full_fulfillment_awaiting_approval.lines.all()
+    ]:
         stock.quantity = -99
         stock.save()
 
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
+    fulfillment = full_fulfillment_awaiting_approval
     query = APPROVE_FULFILLMENT_MUTATION
     fulfillment_id = graphene.Node.to_global_id("Fulfillment", fulfillment.id)
 
@@ -391,13 +398,13 @@ def test_fulfillment_approve_partial_order_fulfill(
     mock_email_fulfillment,
     mock_fulfillment_approved,
     staff_api_client,
-    fulfillment_awaiting_approval,
+    partial_fulfillment_awaiting_approval,
     permission_group_manage_orders,
 ):
     # given
     permission_group_manage_orders.user_set.add(staff_api_client.user)
     query = APPROVE_FULFILLMENT_MUTATION
-    order = fulfillment_awaiting_approval.order
+    order = partial_fulfillment_awaiting_approval.order
 
     second_fulfillment = order.fulfillments.create()
     line_1 = order.lines.first()
@@ -417,7 +424,7 @@ def test_fulfillment_approve_partial_order_fulfill(
     OrderLine.objects.bulk_update([line_1, line_2], ["quantity_fulfilled"])
 
     fulfillment_id = graphene.Node.to_global_id(
-        "Fulfillment", fulfillment_awaiting_approval.id
+        "Fulfillment", partial_fulfillment_awaiting_approval.id
     )
     variables = {"id": fulfillment_id, "notifyCustomer": False}
 
@@ -430,12 +437,12 @@ def test_fulfillment_approve_partial_order_fulfill(
     assert not data["errors"]
     assert data["fulfillment"]["status"] == FulfillmentStatus.FULFILLED.upper()
     assert data["order"]["status"] == "PARTIALLY_FULFILLED"
-    fulfillment_awaiting_approval.refresh_from_db()
-    assert fulfillment_awaiting_approval.status == FulfillmentStatus.FULFILLED
+    partial_fulfillment_awaiting_approval.refresh_from_db()
+    assert partial_fulfillment_awaiting_approval.status == FulfillmentStatus.FULFILLED
 
     assert mock_email_fulfillment.call_count == 0
     mock_fulfillment_approved.assert_called_once_with(
-        fulfillment_awaiting_approval, False
+        partial_fulfillment_awaiting_approval, False
     )
 
 
@@ -505,7 +512,7 @@ def test_fulfillment_approve_preorder(
 def test_fulfillment_approve_trigger_webhook_event(
     mocked_trigger_async,
     staff_api_client,
-    fulfillment,
+    full_fulfillment_awaiting_approval,
     permission_group_manage_orders,
     settings,
     subscription_fulfillment_approved_webhook,
@@ -513,8 +520,8 @@ def test_fulfillment_approve_trigger_webhook_event(
     # given
     settings.PLUGINS = ["saleor.plugins.webhook.plugin.WebhookPlugin"]
     permission_group_manage_orders.user_set.add(staff_api_client.user)
-    fulfillment.status = FulfillmentStatus.WAITING_FOR_APPROVAL
-    fulfillment.save(update_fields=["status"])
+    fulfillment = full_fulfillment_awaiting_approval
+
     query = APPROVE_FULFILLMENT_MUTATION
     fulfillment_id = graphene.Node.to_global_id("Fulfillment", fulfillment.id)
     variables = {"id": fulfillment_id, "notifyCustomer": True}

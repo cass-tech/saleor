@@ -1,6 +1,6 @@
 import uuid
 
-from ... import DEFAULT_ADDRESS
+from ... import DEFAULT_WAREHOUSE_ADDRESS
 from ...utils import get_graphql_content
 
 WAREHOUSE_CREATE_MUTATION = """
@@ -36,9 +36,11 @@ mutation createWarehouse($input: WarehouseCreateInput!) {
 def create_warehouse(
     staff_api_client,
     name="Test warehouse",
-    slug=f"warehouse_slug_{uuid.uuid4()}",
-    address=DEFAULT_ADDRESS,
+    slug=None,
+    address=DEFAULT_WAREHOUSE_ADDRESS,
 ):
+    if slug is None:
+        slug = f"warehouse_slug_{uuid.uuid4()}"
     variables = {
         "input": {
             "name": name,

@@ -6,9 +6,9 @@ from django.conf import settings
 from graphene.utils.str_converters import to_snake_case
 from graphql import GraphQLArgument, GraphQLError, GraphQLField, GraphQLList
 
-from ...channel import ChannelContext
 from ...schema_printer import print_schema
 from .. import ResolveInfo
+from ..context import BaseContext
 from .entities import federated_entities
 
 
@@ -23,7 +23,7 @@ class _Any(graphene.Scalar):
 
     @staticmethod
     def parse_literal(any_value: Any):
-        raise any_value
+        return any_value
 
     @staticmethod
     def parse_value(any_value: Any):
@@ -81,7 +81,7 @@ def create_entity_type_resolver(schema):
 
     def resolve_entity_type(instance, info: ResolveInfo):
         # Use new strategy to resolve GraphQL Type for `ObjectType`
-        if isinstance(instance, ChannelContext):
+        if isinstance(instance, BaseContext):
             model = type(instance.node)
         else:
             model = type(instance)
@@ -113,7 +113,8 @@ def resolve_entities(_, info: ResolveInfo, *, representations):
             try:
                 model = federated_entities[representation["__typename"]]
                 resolvers[representation["__typename"]] = getattr(
-                    model, "_%s__resolve_references" % representation["__typename"]
+                    model,
+                    "_{}__resolve_references".format(representation["__typename"]),
                 )
             except AttributeError:
                 pass

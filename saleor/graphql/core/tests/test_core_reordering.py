@@ -111,7 +111,7 @@ def test_inserting_at_the_edges(sorted_entries_seq, operation, expected_operatio
     expected = _sorted_by_order(
         [
             (node.pk, node.sort_order + op)
-            for node, op in zip(nodes, expected_operations)
+            for node, op in zip(nodes, expected_operations, strict=False)
         ]
     )
 
@@ -225,19 +225,18 @@ def test_reordering_concurrently(dummy_attribute, assert_num_queries):
         perform_reordering(qs, operations)
 
     assert ctx[0]["sql"] == (
-        'SELECT "attribute_attributevalue"."id", '
-        '"attribute_attributevalue"."sort_order" '
+        'SELECT "attribute_attributevalue"."id" AS "pk", '
+        '"attribute_attributevalue"."sort_order" AS "sort_order" '
         'FROM "attribute_attributevalue" '
-        "ORDER BY "
-        '"attribute_attributevalue"."sort_order" ASC NULLS LAST, '
+        "ORDER BY 2 ASC NULLS LAST, "
         '"attribute_attributevalue"."id" ASC FOR UPDATE'
     )
     assert ctx[1]["sql"] == (
         'UPDATE "attribute_attributevalue" '
         'SET "sort_order" = '
-        f'CAST(CASE WHEN ("attribute_attributevalue"."id" = {entries[0].pk}) '
+        f'(CASE WHEN ("attribute_attributevalue"."id" = {entries[0].pk}) '
         f'THEN 1 WHEN ("attribute_attributevalue"."id" = {entries[1].pk}) '
-        "THEN 0 ELSE NULL END AS integer) "
+        "THEN 0 ELSE NULL END)::integer "
         'WHERE "attribute_attributevalue"."id" '
         f"IN ({entries[0].pk}, {entries[1].pk})"
     )
@@ -266,8 +265,8 @@ def test_reordering_deleted_node_from_concurrent_update(
     assert ctx[1]["sql"] == (
         'UPDATE "attribute_attributevalue" '
         'SET "sort_order" = '
-        f'CAST(CASE WHEN ("attribute_attributevalue"."id" = {entries[0].pk}) '
+        f'(CASE WHEN ("attribute_attributevalue"."id" = {entries[0].pk}) '
         f'THEN 1 WHEN ("attribute_attributevalue"."id" = {entries[1].pk}) '
-        "THEN 0 ELSE NULL END AS integer) "
+        "THEN 0 ELSE NULL END)::integer "
         f'WHERE "attribute_attributevalue"."id" IN ({entries[0].pk}, {entries[1].pk})'
     )

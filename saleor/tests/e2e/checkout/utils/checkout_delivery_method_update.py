@@ -1,6 +1,8 @@
+from ...account.utils.fragments import ADDRESS_FRAGMENT
 from ...utils import get_graphql_content
 
-CHECKOUT_DELIVERY_METHOD_UPDATE_MUTATION = """
+CHECKOUT_DELIVERY_METHOD_UPDATE_MUTATION = (
+    """
 mutation checkoutDeliveryMethodUpdate($checkoutId: ID!, $deliveryMethodId: ID) {
   checkoutDeliveryMethodUpdate(
     id: $checkoutId
@@ -13,6 +15,8 @@ mutation checkoutDeliveryMethodUpdate($checkoutId: ID!, $deliveryMethodId: ID) {
     }
     checkout {
       id
+      chargeStatus
+      authorizeStatus
       totalPrice {
         gross {
           amount
@@ -46,6 +50,9 @@ mutation checkoutDeliveryMethodUpdate($checkoutId: ID!, $deliveryMethodId: ID) {
           amount
         }
       }
+      shippingAddress {
+        ...Address
+      }
       deliveryMethod {
         ... on ShippingMethod {
           id
@@ -57,10 +64,15 @@ mutation checkoutDeliveryMethodUpdate($checkoutId: ID!, $deliveryMethodId: ID) {
           id
         }
       }
+      shippingAddress {
+        ...Address
+      }
     }
   }
 }
 """
+    + ADDRESS_FRAGMENT
+)
 
 
 def checkout_delivery_method_update(

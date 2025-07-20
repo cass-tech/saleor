@@ -1,21 +1,18 @@
-from datetime import datetime
-from typing import Optional
+import datetime
 
 import graphene
-import pytz
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from .....discount import PromotionType, events, models
-from .....discount.utils import mark_catalogue_promotion_rules_as_dirty
+from .....discount.utils.promotion import mark_catalogue_promotion_rules_as_dirty
 from .....permission.enums import DiscountPermissions
 from .....plugins.manager import PluginsManager
 from .....webhook.event_types import WebhookEventAsyncType
 from ....app.dataloaders import get_app_promise
 from ....core import ResolveInfo
-from ....core.descriptions import ADDED_IN_317, PREVIEW_FEATURE
 from ....core.doc_category import DOC_CATEGORY_DISCOUNTS
-from ....core.mutations import ModelMutation
+from ....core.mutations import DeprecatedModelMutation
 from ....core.types import Error
 from ....core.utils import WebhookEventInfo
 from ....core.validators import validate_end_is_after_start
@@ -39,7 +36,7 @@ class PromotionUpdateInput(PromotionInput):
     name = graphene.String(description="Promotion name.")
 
 
-class PromotionUpdate(ModelMutation):
+class PromotionUpdate(DeprecatedModelMutation):
     class Arguments:
         id = graphene.ID(required=True, description="ID of the promotion to update.")
         input = PromotionUpdateInput(
@@ -47,7 +44,7 @@ class PromotionUpdate(ModelMutation):
         )
 
     class Meta:
-        description = "Updates an existing promotion." + ADDED_IN_317 + PREVIEW_FEATURE
+        description = "Updates an existing promotion."
         model = models.Promotion
         object_type = Promotion
         permissions = (DiscountPermissions.MANAGE_DISCOUNTS,)
@@ -92,9 +89,9 @@ class PromotionUpdate(ModelMutation):
         end_date = cleaned_input.get("end_date") or instance.end_date
         try:
             validate_end_is_after_start(start_date, end_date)
-        except ValidationError as error:
-            error.code = PromotionUpdateErrorCode.INVALID.value
-            raise ValidationError({"endDate": error})
+        except ValidationError as e:
+            e.code = PromotionUpdateErrorCode.INVALID.value
+            raise ValidationError({"endDate": e}) from e
         return cleaned_input
 
     @classmethod
@@ -114,7 +111,7 @@ class PromotionUpdate(ModelMutation):
             cls.call_event(mark_catalogue_promotion_rules_as_dirty, [instance.pk])
 
     @classmethod
-    def get_toggle_type(cls, instance, clean_input, previous_end_date) -> Optional[str]:
+    def get_toggle_type(cls, instance, clean_input, previous_end_date) -> str | None:
         """Check if promotion has started, ended or there was no toggle.
 
         Promotion toggles when start or end date already passed and the
@@ -124,7 +121,7 @@ class PromotionUpdate(ModelMutation):
         :return: "started" if promotion has started, "ended" if promotion has ended or
         None if there was no toggle.
         """
-        now = datetime.now(pytz.utc)
+        now = datetime.datetime.now(tz=datetime.UTC)
         notification_date = instance.last_notification_scheduled_at
         start_date = clean_input.get("start_date")
         end_date = clean_input.get("end_date")
@@ -156,7 +153,7 @@ class PromotionUpdate(ModelMutation):
         cls,
         manager: "PluginsManager",
         instance: models.Promotion,
-        toggle_type: Optional[str],
+        toggle_type: str | None,
     ):
         """Send a webhook about starting or ending promotion, if it wasn't sent yet."""
         event = None
@@ -166,7 +163,9 @@ class PromotionUpdate(ModelMutation):
             event = manager.promotion_ended
         if event:
             cls.call_event(event, instance)
-            instance.last_notification_scheduled_at = datetime.now(pytz.utc)
+            instance.last_notification_scheduled_at = datetime.datetime.now(
+                tz=datetime.UTC
+            )
             instance.save(update_fields=["last_notification_scheduled_at"])
 
     @classmethod
@@ -174,7 +173,7 @@ class PromotionUpdate(ModelMutation):
         cls,
         info: ResolveInfo,
         instance: models.Promotion,
-        toggle_type: Optional[str],
+        toggle_type: str | None,
     ):
         app = get_app_promise(info.context).get()
         user = info.context.user

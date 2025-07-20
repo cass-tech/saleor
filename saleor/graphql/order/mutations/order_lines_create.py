@@ -1,13 +1,16 @@
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 
 import graphene
 from django.core.exceptions import ValidationError
 
+from ....account.models import User
+from ....app.models import App
 from ....core.taxes import TaxError
 from ....core.tracing import traced_atomic_transaction
 from ....order import events
+from ....order import models as order_models
 from ....order.error_codes import OrderErrorCode
-from ....order.fetch import fetch_order_lines
+from ....order.fetch import OrderLineInfo, fetch_order_lines
 from ....order.search import update_order_search_vector
 from ....order.utils import (
     add_variant_to_order,
@@ -15,8 +18,11 @@ from ....order.utils import (
     recalculate_order_weight,
 )
 from ....permission.enums import OrderPermissions
+from ....plugins.manager import PluginsManager
+from ....product import models as product_models
 from ...app.dataloaders import get_app_promise
 from ...core import ResolveInfo
+from ...core.context import SyncWebhookControlContext
 from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.mutations import BaseMutation
 from ...core.types import NonNullList, OrderError
@@ -31,11 +37,10 @@ from ..utils import (
 from .draft_order_create import OrderLineCreateInput
 from .utils import (
     EditableOrderValidationMixin,
+    VariantData,
+    call_event_by_order_status,
     get_variant_rule_info_map,
-    get_webhook_handler_by_order_status,
 )
-
-VariantData = namedtuple("VariantData", ["variant", "rules_info"])
 
 
 class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
@@ -62,7 +67,11 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
 
     @classmethod
     def validate_lines(
-        cls, info: ResolveInfo, data, existing_lines_info, variants_data
+        cls,
+        info: ResolveInfo,
+        data: list,
+        existing_lines_info: list[OrderLineInfo],
+        variant_rule_map: dict[str, VariantData],
     ):
         grouped_lines_data: list[OrderLineData] = []
         lines_data_map: dict[str, OrderLineData] = defaultdict(OrderLineData)
@@ -75,8 +84,8 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
         for input_line in data:
             variant_id: str = input_line["variant_id"]
             force_new_line = input_line["force_new_line"]
-            variant_data = variants_data.get(variant_id)
-            variant = variant_data.variant
+            variant_rule_data = variant_rule_map[variant_id]
+            variant = variant_rule_data.variant
             quantity = input_line["quantity"]
 
             custom_price = input_line.get("price")
@@ -88,7 +97,7 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
                             variant=variant,
                             quantity=quantity,
                             price_override=custom_price,
-                            rules_info=variant_data.rules_info,
+                            rules_info=variant_rule_data.rules_info,
                         )
                     )
                 else:
@@ -106,7 +115,7 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
                     line_data.variant = variant
                     line_data.quantity += quantity
                     line_data.price_override = custom_price
-                    line_data.rules_info = variant_data.rules_info
+                    line_data.rules_info = variant_rule_data.rules_info
             else:
                 invalid_ids.append(variant_id)
         if invalid_ids:
@@ -124,18 +133,26 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
         return grouped_lines_data
 
     @classmethod
-    def validate_variants(cls, order, variants):
+    def validate_variants(
+        cls, order: order_models.Order, variants: list[product_models.ProductVariant]
+    ):
         try:
             channel = order.channel
             validate_product_is_published_in_channel(variants, channel)
             validate_variant_channel_listings(variants, channel)
-        except ValidationError as error:
-            cls.remap_error_fields(error, cls._meta.errors_mapping)
-            raise ValidationError(error)
+        except ValidationError as e:
+            cls.remap_error_fields(e, cls._meta.errors_mapping)
+            raise ValidationError(e) from e
 
     @staticmethod
-    def add_lines_to_order(order, lines_data, user, app, manager):
-        added_lines: list[OrderLine] = []
+    def add_lines_to_order(
+        order: order_models.Order,
+        lines_data: list[OrderLineData],
+        user: User | None,
+        app: App | None,
+        manager: PluginsManager,
+    ):
+        added_lines: list[order_models.OrderLine] = []
         try:
             for line_data in lines_data:
                 line = add_variant_to_order(
@@ -147,11 +164,11 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
                     allocate_stock=order.is_unconfirmed(),
                 )
                 added_lines.append(line)
-        except TaxError as tax_error:
+        except TaxError as e:
             raise ValidationError(
-                f"Unable to calculate taxes - {str(tax_error)}",
+                f"Unable to calculate taxes - {str(e)}",
                 code=OrderErrorCode.TAX_ERROR.value,
-            )
+            ) from e
         return added_lines
 
     @classmethod
@@ -165,12 +182,12 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
         variant_pks = cls.get_global_ids_or_error(
             [line["variant_id"] for line in input], ProductVariant, "variant_id"
         )
-        variants_data = get_variant_rule_info_map(
+        variants_rule_map = get_variant_rule_info_map(
             variant_pks, order.channel_id, order.language_code
         )
 
         lines_to_add = cls.validate_lines(
-            info, input, existing_lines_info, variants_data
+            info, input, existing_lines_info, variants_rule_map
         )
         variants = [line.variant for line in lines_to_add]
         cls.validate_variants(order, variants)
@@ -196,24 +213,30 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
             invalidate_order_prices(order)
             recalculate_order_weight(order)
             update_order_search_vector(order, save=False)
+            order.lines_count = order.lines.count()
             order.save(
                 update_fields=[
                     "should_refresh_prices",
                     "weight",
                     "search_vector",
                     "updated_at",
+                    "lines_count",
                 ]
             )
-            func = get_webhook_handler_by_order_status(order.status, manager)
-            cls.call_event(func, order)
+            call_event_by_order_status(order, manager)
 
-        return OrderLinesCreate(order=order, order_lines=added_lines)
+        return OrderLinesCreate(
+            order=SyncWebhookControlContext(order),
+            order_lines=[SyncWebhookControlContext(node=line) for line in added_lines],
+        )
 
     @classmethod
-    def _find_line_id_for_variant_if_exist(cls, variant_id, lines_info):
+    def _find_line_id_for_variant_if_exist(
+        cls, variant_id: int, lines_info: list[OrderLineInfo]
+    ) -> None | str:
         """Return line id by using provided variantId parameter."""
         if not lines_info:
-            return
+            return None
 
         line_info = list(
             filter(
@@ -222,6 +245,6 @@ class OrderLinesCreate(EditableOrderValidationMixin, BaseMutation):
         )
 
         if not line_info or len(line_info) > 1:
-            return
+            return None
 
         return str(line_info[0].line.id)

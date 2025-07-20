@@ -1,5 +1,5 @@
 import decimal
-from typing import Any, Optional, Union
+from typing import Any
 
 import graphene
 from django.core.exceptions import ValidationError
@@ -9,12 +9,8 @@ from ....order import models
 from ....order.utils import update_order_charge_data
 from ....permission.enums import OrderPermissions
 from ...core import ResolveInfo
-from ...core.descriptions import (
-    ADDED_IN_313,
-    ADDED_IN_315,
-    ADDED_IN_320,
-    PREVIEW_FEATURE,
-)
+from ...core.context import SyncWebhookControlContext
+from ...core.descriptions import ADDED_IN_320, PREVIEW_FEATURE
 from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.mutations import BaseMutation
 from ...core.scalars import Decimal
@@ -44,9 +40,7 @@ class OrderGrantRefundCreateError(Error):
     code = OrderGrantRefundCreateErrorCode(description="The error code.", required=True)
     lines = NonNullList(
         OrderGrantRefundCreateLineError,
-        description="List of lines which cause the error."
-        + ADDED_IN_315
-        + PREVIEW_FEATURE,
+        description="List of lines which cause the error.",
         required=False,
     )
 
@@ -76,15 +70,11 @@ class OrderGrantRefundCreateInput(BaseInputObjectType):
     reason = graphene.String(description="Reason of the granted refund.")
     lines = NonNullList(
         OrderGrantRefundCreateLineInput,
-        description="Lines to assign to granted refund."
-        + ADDED_IN_315
-        + PREVIEW_FEATURE,
+        description="Lines to assign to granted refund.",
         required=False,
     )
     grant_refund_for_shipping = graphene.Boolean(
-        description="Determine if granted refund should include shipping costs."
-        + ADDED_IN_315
-        + PREVIEW_FEATURE,
+        description="Determine if granted refund should include shipping costs.",
         required=False,
     )
     transaction_id = graphene.ID(
@@ -94,12 +84,10 @@ class OrderGrantRefundCreateInput(BaseInputObjectType):
             "be equal or greater than provided `amount`."
             "If `amount` is not provided in the input and calculated automatically by "
             "Saleor, the `min(calculatedAmount, transaction.chargedAmount)` will be "
-            "used."
-            "Field will be required starting from Saleor 3.21."
-            + ADDED_IN_320
-            + PREVIEW_FEATURE
+            "used. "
+            "Field required starting from Saleor 3.21." + ADDED_IN_320 + PREVIEW_FEATURE
         ),
-        required=False,
+        required=True,
     )
 
     class Meta:
@@ -122,9 +110,7 @@ class OrderGrantRefundCreate(BaseMutation):
         )
 
     class Meta:
-        description = (
-            "Adds granted refund to the order." + ADDED_IN_313 + PREVIEW_FEATURE
-        )
+        description = "Adds granted refund to the order."
         permissions = (OrderPermissions.MANAGE_ORDERS,)
         error_type_class = OrderGrantRefundCreateError
         doc_category = DOC_CATEGORY_ORDERS
@@ -133,8 +119,8 @@ class OrderGrantRefundCreate(BaseMutation):
     def clean_input_lines(
         cls,
         order: models.Order,
-        lines: list[dict[str, Union[str, int]]],
-    ) -> tuple[list[models.OrderGrantedRefundLine], Optional[list[dict[str, str]]]]:
+        lines: list[dict[str, str | int]],
+    ) -> tuple[list[models.OrderGrantedRefundLine], list[dict[str, str]] | None]:
         errors: list[dict[str, str]] = []
         input_lines_data = get_input_lines_data(
             lines, errors, OrderGrantRefundCreateLineErrorCode.GRAPHQL_ERROR.value
@@ -207,7 +193,7 @@ class OrderGrantRefundCreate(BaseMutation):
         reason = input.get("reason") or ""
         transaction_id = input.get("transaction_id")
         input_lines = input.get("lines", [])
-        grant_refund_for_shipping = input.get("grant_refund_for_shipping", None)
+        grant_refund_for_shipping = input.get("grant_refund_for_shipping", False)
 
         cls.validate_input(input)
 
@@ -304,4 +290,7 @@ class OrderGrantRefundCreate(BaseMutation):
                 models.OrderGrantedRefundLine.objects.bulk_create(cleaned_input_lines)
             update_order_charge_data(order)
 
-        return cls(order=order, granted_refund=granted_refund)
+        return cls(
+            order=SyncWebhookControlContext(order),
+            granted_refund=SyncWebhookControlContext(node=granted_refund),
+        )

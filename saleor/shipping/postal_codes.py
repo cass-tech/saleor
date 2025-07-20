@@ -1,11 +1,11 @@
 import re
-from typing import Any, Optional
+from typing import Any
 
 from . import PostalCodeRuleInclusionType
 
 
 def group_values(pattern, *values):
-    result: list[Optional[tuple[Any, ...]]] = []
+    result: list[tuple[Any, ...] | None] = []
     for value in values:
         try:
             val = re.match(pattern, value)
@@ -101,17 +101,13 @@ def is_shipping_method_applicable_for_postal_code(
     if not results:
         return True
     if all(
-        map(
-            lambda rule: rule.inclusion_type == PostalCodeRuleInclusionType.INCLUDE,
-            results.keys(),
-        )
+        rule.inclusion_type == PostalCodeRuleInclusionType.INCLUDE
+        for rule in results.keys()
     ):
         return any(results.values())
     if all(
-        map(
-            lambda rule: rule.inclusion_type == PostalCodeRuleInclusionType.EXCLUDE,
-            results.keys(),
-        )
+        rule.inclusion_type == PostalCodeRuleInclusionType.EXCLUDE
+        for rule in results.keys()
     ):
         return not any(results.values())
     # Shipping methods with complex rules are not supported for now

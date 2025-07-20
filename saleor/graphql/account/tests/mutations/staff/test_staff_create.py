@@ -3,15 +3,15 @@ from unittest.mock import call, patch
 from urllib.parse import urlencode
 
 import graphene
-from django.contrib.auth.tokens import default_token_generator
 from django.utils.functional import SimpleLazyObject
 from freezegun import freeze_time
 
 from ......account.error_codes import AccountErrorCode
 from ......account.models import Group, User
 from ......account.notifications import get_default_user_payload
-from ......core.notify_events import NotifyEventType
+from ......core.notify import NotifyEventType
 from ......core.tests.utils import get_site_context_payload
+from ......core.tokens import token_generator
 from ......core.utils.json_serializer import CustomJsonEncoder
 from ......core.utils.url import prepare_url
 from ......webhook.event_types import WebhookEventAsyncType
@@ -121,7 +121,7 @@ def test_staff_create(
     assert len(groups) == 1
     assert {perm["code"].lower() for perm in groups[0]["permissions"]} == expected_perms
 
-    token = default_token_generator.make_token(staff_user)
+    token = token_generator.make_token(staff_user)
     params = urlencode({"email": email, "token": token})
     password_set_url = prepare_url(params, redirect_url)
     expected_payload = {
@@ -133,11 +133,14 @@ def test_staff_create(
         **get_site_context_payload(site_settings.site),
     }
 
-    mocked_notify.assert_called_once_with(
-        NotifyEventType.ACCOUNT_SET_STAFF_PASSWORD,
-        payload=expected_payload,
-        channel_slug=None,
-    )
+    assert mocked_notify.call_count == 1
+    call_args = mocked_notify.call_args_list[0]
+    called_args = call_args.args
+    called_kwargs = call_args.kwargs
+    assert called_args[0] == NotifyEventType.ACCOUNT_SET_STAFF_PASSWORD
+    assert len(called_kwargs) == 2
+    assert called_kwargs["payload_func"]() == expected_payload
+    assert called_kwargs["channel_slug"] is None
 
 
 @freeze_time("2018-05-31 12:00:01")
@@ -372,7 +375,7 @@ def test_staff_create_out_of_scope_group(
     assert len(groups) == 2
     for group in expected_groups:
         assert group in groups
-    token = default_token_generator.make_token(staff_user)
+    token = token_generator.make_token(staff_user)
     params = urlencode({"email": email, "token": token})
     password_set_url = prepare_url(params, redirect_url)
     expected_payload = {
@@ -384,11 +387,14 @@ def test_staff_create_out_of_scope_group(
         **get_site_context_payload(site_settings.site),
     }
 
-    mocked_notify.assert_called_once_with(
-        NotifyEventType.ACCOUNT_SET_STAFF_PASSWORD,
-        payload=expected_payload,
-        channel_slug=None,
-    )
+    assert mocked_notify.call_count == 1
+    call_args = mocked_notify.call_args_list[0]
+    called_args = call_args.args
+    called_kwargs = call_args.kwargs
+    assert called_args[0] == NotifyEventType.ACCOUNT_SET_STAFF_PASSWORD
+    assert len(called_kwargs) == 2
+    assert called_kwargs["payload_func"]() == expected_payload
+    assert called_kwargs["channel_slug"] is None
 
 
 @freeze_time("2018-05-31 12:00:01")
@@ -410,7 +416,7 @@ def test_staff_create_send_password_with_url(
     staff_user = User.objects.get(email=email)
     assert staff_user.is_staff
 
-    token = default_token_generator.make_token(staff_user)
+    token = token_generator.make_token(staff_user)
     params = urlencode({"email": email, "token": token})
     password_set_url = prepare_url(params, redirect_url)
     expected_payload = {
@@ -422,11 +428,14 @@ def test_staff_create_send_password_with_url(
         **get_site_context_payload(site_settings.site),
     }
 
-    mocked_notify.assert_called_once_with(
-        NotifyEventType.ACCOUNT_SET_STAFF_PASSWORD,
-        payload=expected_payload,
-        channel_slug=None,
-    )
+    assert mocked_notify.call_count == 1
+    call_args = mocked_notify.call_args_list[0]
+    called_args = call_args.args
+    called_kwargs = call_args.kwargs
+    assert called_args[0] == NotifyEventType.ACCOUNT_SET_STAFF_PASSWORD
+    assert len(called_kwargs) == 2
+    assert called_kwargs["payload_func"]() == expected_payload
+    assert called_kwargs["channel_slug"] is None
 
 
 def test_staff_create_without_send_password(

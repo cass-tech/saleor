@@ -1,13 +1,11 @@
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from decimal import Decimal
 from functools import partial
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 from urllib.parse import urljoin
 
-import opentracing
-import opentracing.tags
 from django.core.exceptions import ValidationError
 from django.utils.functional import SimpleLazyObject
 from django_countries import countries
@@ -15,7 +13,10 @@ from prices import Money, TaxedMoney, TaxedMoneyRange
 
 from ...checkout import base_calculations
 from ...checkout.fetch import fetch_checkout_lines
-from ...core.taxes import TaxError, TaxType, zero_taxed_money
+from ...checkout.utils import log_address_if_validation_skipped_for_checkout
+from ...core.prices import MAXIMUM_PRICE
+from ...core.taxes import TaxDataErrorMessage, TaxError, TaxType, zero_taxed_money
+from ...core.telemetry import saleor_attributes, tracer
 from ...order import base_calculations as order_base_calculation
 from ...order.interface import OrderTaxedPricesData
 from ...product.models import ProductType
@@ -36,6 +37,7 @@ from . import (
     DEFAULT_TAX_DESCRIPTION,
     META_CODE_KEY,
     META_DESCRIPTION_KEY,
+    SHIPPING_ITEM_CODE,
     AvataxConfiguration,
     CustomerErrors,
     TransactionType,
@@ -74,9 +76,14 @@ def _get_prices_entered_with_tax_for_order(order: "Order"):
     return tax_configuration.prices_entered_with_tax
 
 
-class AvataxPlugin(BasePlugin):
-    PLUGIN_NAME = "Avalara"
+class DeprecatedAvataxPlugin(BasePlugin):
+    """Deprecated.
+
+    This plugin is deprecated and will be removed in future version.
+    """
+
     PLUGIN_ID = "mirumee.taxes.avalara"
+    PLUGIN_NAME = "Avalara"
     # identifier used in tax configuration
     PLUGIN_IDENTIFIER = PLUGIN_IDENTIFIER_PREFIX + PLUGIN_ID
 
@@ -182,7 +189,7 @@ class AvataxPlugin(BasePlugin):
         )
 
     def _skip_plugin(
-        self, previous_value: Union[TaxedMoney, TaxedMoneyRange, Decimal]
+        self, previous_value: TaxedMoney | TaxedMoneyRange | Decimal
     ) -> bool:
         if not (self.config.username_or_account and self.config.password_or_license):
             return True
@@ -204,7 +211,7 @@ class AvataxPlugin(BasePlugin):
     def calculate_checkout_total(
         self,
         checkout_info: "CheckoutInfo",
-        lines: Iterable["CheckoutLineInfo"],
+        lines: list["CheckoutLineInfo"],
         address: Optional["Address"],
         previous_value: TaxedMoney,
     ) -> TaxedMoney:
@@ -227,9 +234,7 @@ class AvataxPlugin(BasePlugin):
                 # for some cases we will need a base_value but no need to call it for
                 # each line
                 base_value=SimpleLazyObject(
-                    lambda: base_calculations.calculate_base_line_total_price(
-                        line, checkout_info.channel
-                    )
+                    lambda: base_calculations.calculate_base_line_total_price(line)
                 ),
             )
             taxed_total += taxed_line_total_data
@@ -259,7 +264,7 @@ class AvataxPlugin(BasePlugin):
         shipping_tax = Decimal(0.0)
         shipping_net = shipping_price.amount
         for line in lines:
-            if line["itemCode"] == "Shipping":
+            if line["itemCode"] == SHIPPING_ITEM_CODE:
                 # The lineAmount does not include the discountAmount,
                 # but tax is calculated for discounted net price, that
                 # take into account provided discount.
@@ -287,7 +292,7 @@ class AvataxPlugin(BasePlugin):
     def calculate_checkout_shipping(
         self,
         checkout_info: "CheckoutInfo",
-        lines: Iterable["CheckoutLineInfo"],
+        lines: list["CheckoutLineInfo"],
         address: Optional["Address"],
         previous_value: TaxedMoney,
     ) -> TaxedMoney:
@@ -305,7 +310,7 @@ class AvataxPlugin(BasePlugin):
     def preprocess_order_creation(
         self,
         checkout_info: "CheckoutInfo",
-        lines: Optional[Iterable["CheckoutLineInfo"]],
+        lines: list["CheckoutLineInfo"] | None,
         previous_value: Any,
     ):
         """Ensure all the data is correct and we can proceed with creation of order.
@@ -323,8 +328,8 @@ class AvataxPlugin(BasePlugin):
         if self._skip_plugin(previous_value):
             return previous_value
 
-        tax_strategy = get_tax_calculation_strategy_for_checkout(checkout_info, lines)
-        tax_app_identifier = get_tax_app_identifier_for_checkout(checkout_info, lines)
+        tax_strategy = get_tax_calculation_strategy_for_checkout(checkout_info)
+        tax_app_identifier = get_tax_app_identifier_for_checkout(checkout_info)
         if (
             tax_strategy == TaxCalculationStrategy.FLAT_RATES
             or tax_app_identifier is not None
@@ -344,12 +349,8 @@ class AvataxPlugin(BasePlugin):
         transaction_url = urljoin(
             get_api_url(self.config.use_sandbox), "transactions/createoradjust"
         )
-        with opentracing.global_tracer().start_active_span(
-            "avatax.transactions.crateoradjust"
-        ) as scope:
-            span = scope.span
-            span.set_tag(opentracing.tags.COMPONENT, "tax")
-            span.set_tag("service.name", "avatax")
+        with tracer.start_as_current_span("avatax.transactions.crateoradjust") as span:
+            span.set_attribute(saleor_attributes.COMPONENT, "tax")
             response = api_post_request(transaction_url, data, self.config)
         if not response or "error" in response:
             msg = response.get("error", {}).get("message", "")
@@ -361,11 +362,14 @@ class AvataxPlugin(BasePlugin):
                 error_code,
                 msg,
             )
+            log_address_if_validation_skipped_for_checkout(checkout_info, logger)
             customer_msg = CustomerErrors.get_error_msg(response.get("error", {}))
             raise TaxError(customer_msg)
         return previous_value
 
-    def order_confirmed(self, order: "Order", previous_value: Any) -> Any:
+    def order_confirmed(
+        self, order: "Order", previous_value: Any, webhooks=None
+    ) -> Any:
         if not self.active:
             return previous_value
         tax_strategy = get_tax_calculation_strategy_for_order(order)
@@ -392,12 +396,12 @@ class AvataxPlugin(BasePlugin):
     def calculate_checkout_line_total(
         self,
         checkout_info: "CheckoutInfo",
-        lines: Iterable["CheckoutLineInfo"],
+        lines: list["CheckoutLineInfo"],
         checkout_line_info: "CheckoutLineInfo",
         address: Optional["Address"],
         previous_value: TaxedMoney,
     ) -> TaxedMoney:
-        charge_taxes = get_charge_taxes_for_checkout(checkout_info, lines)
+        charge_taxes = get_charge_taxes_for_checkout(checkout_info)
         if not charge_taxes:
             return previous_value
 
@@ -417,7 +421,7 @@ class AvataxPlugin(BasePlugin):
             prices_entered_with_tax,
             base_value=SimpleLazyObject(
                 lambda: base_calculations.calculate_base_line_total_price(
-                    checkout_line_info, checkout_info.channel
+                    checkout_line_info
                 )
             ),
         )
@@ -444,7 +448,7 @@ class AvataxPlugin(BasePlugin):
 
             if currency == "JPY" and prices_entered_with_tax():
                 if isinstance(base_value, SimpleLazyObject):
-                    base_value = base_value._setupfunc()  # type: ignore
+                    base_value = base_value._setupfunc()  # type: ignore[attr-defined]
 
                 line_gross = Money(
                     base_value.amount - discount_amount, currency=currency
@@ -457,7 +461,7 @@ class AvataxPlugin(BasePlugin):
 
             return TaxedMoney(net=line_net, gross=line_gross)
         if isinstance(base_value, SimpleLazyObject):
-            base_value = base_value._setupfunc()  # type: ignore
+            base_value = base_value._setupfunc()  # type: ignore[attr-defined]
         return TaxedMoney(net=base_value, gross=base_value)
 
     def calculate_order_line_total(
@@ -533,14 +537,13 @@ class AvataxPlugin(BasePlugin):
     def calculate_checkout_line_unit_price(
         self,
         checkout_info: "CheckoutInfo",
-        lines: Iterable["CheckoutLineInfo"],
+        lines: list["CheckoutLineInfo"],
         checkout_line_info: "CheckoutLineInfo",
         address: Optional["Address"],
         previous_value: TaxedMoney,
     ) -> TaxedMoney:
         base_total = previous_value
-        charge_taxes = get_charge_taxes_for_checkout(checkout_info, lines)
-
+        charge_taxes = get_charge_taxes_for_checkout(checkout_info)
         if not charge_taxes:
             return base_total
 
@@ -560,7 +563,7 @@ class AvataxPlugin(BasePlugin):
             prices_entered_with_tax,
             base_value=SimpleLazyObject(
                 lambda: base_calculations.calculate_base_line_total_price(
-                    checkout_line_info, checkout_info.channel
+                    checkout_line_info
                 )
             ),
         )
@@ -601,7 +604,7 @@ class AvataxPlugin(BasePlugin):
         prices_entered_with_tax = partial(_get_prices_entered_with_tax_for_order, order)
         currency = taxes_data.get("currencyCode")
         for line in taxes_data.get("lines", []):
-            if line["itemCode"] == "Shipping":
+            if line["itemCode"] == SHIPPING_ITEM_CODE:
                 tax = Decimal(line.get("tax", 0.0))
                 discount_amount = Decimal(line.get("discountAmount", 0.0))
                 net = Decimal(line.get("lineAmount", 0.0)) - discount_amount
@@ -677,21 +680,23 @@ class AvataxPlugin(BasePlugin):
     def get_checkout_line_tax_rate(
         self,
         checkout_info: "CheckoutInfo",
-        lines: Iterable["CheckoutLineInfo"],
+        lines: list["CheckoutLineInfo"],
         checkout_line_info: "CheckoutLineInfo",
         address: Optional["Address"],
         previous_value: Decimal,
     ) -> Decimal:
-        charge_taxes = get_charge_taxes_for_checkout(checkout_info, lines)
+        charge_taxes = get_charge_taxes_for_checkout(checkout_info)
         if not charge_taxes:
             return previous_value
 
         response = self._get_checkout_tax_data(checkout_info, lines, previous_value)
         variant = checkout_line_info.variant
-        return self._get_unit_tax_rate(
+        return self._get_item_tax_rate(
             response,
             variant.sku or variant.get_global_id(),
             previous_value,
+            str(checkout_info.checkout.pk),
+            "Checkout",
         )
 
     def get_order_line_tax_rate(
@@ -707,45 +712,65 @@ class AvataxPlugin(BasePlugin):
             return previous_value
 
         response = self._get_order_tax_data(order, previous_value)
-        return self._get_unit_tax_rate(
+        return self._get_item_tax_rate(
             response,
             variant.sku or variant.get_global_id(),
             previous_value,
+            str(order.pk),
+            "Order",
         )
 
     def get_checkout_shipping_tax_rate(
         self,
         checkout_info: "CheckoutInfo",
-        lines: Iterable["CheckoutLineInfo"],
+        lines: list["CheckoutLineInfo"],
         address: Optional["Address"],
         previous_value: Decimal,
     ):
         response = self._get_checkout_tax_data(checkout_info, lines, previous_value)
-        return self._get_shipping_tax_rate(response, previous_value)
+        return self._get_item_tax_rate(
+            response,
+            SHIPPING_ITEM_CODE,
+            previous_value,
+            str(checkout_info.checkout.pk),
+            "Checkout",
+        )
 
     def get_order_shipping_tax_rate(self, order: "Order", previous_value: Decimal):
         response = self._get_order_tax_data(order, previous_value)
-        return self._get_shipping_tax_rate(response, previous_value)
+        return self._get_item_tax_rate(
+            response, SHIPPING_ITEM_CODE, previous_value, str(order.pk), "Order"
+        )
 
     def _get_checkout_tax_data(
         self,
         checkout_info: "CheckoutInfo",
-        lines_info: Iterable["CheckoutLineInfo"],
-        base_value: Union[TaxedMoney, Decimal],
+        lines_info: list["CheckoutLineInfo"],
+        base_value: TaxedMoney | Decimal,
     ):
         if self._skip_plugin(base_value):
-            self._set_checkout_tax_error(checkout_info, lines_info)
+            self._set_checkout_tax_error(
+                checkout_info, lines_info, TaxDataErrorMessage.EMPTY
+            )
             return None
 
         valid = _validate_checkout(checkout_info, lines_info)
         if not valid:
-            self._set_checkout_tax_error(checkout_info, lines_info)
+            self._set_checkout_tax_error(
+                checkout_info, lines_info, TaxDataErrorMessage.EMPTY
+            )
             return None
 
         response = get_checkout_tax_data(checkout_info, lines_info, self.config)
 
         if not response or "error" in response:
-            self._set_checkout_tax_error(checkout_info, lines_info)
+            self._set_checkout_tax_error(
+                checkout_info, lines_info, TaxDataErrorMessage.EMPTY
+            )
+            return None
+
+        if tax_error := self.validate_tax_data(response, lines_info):
+            self._set_checkout_tax_error(checkout_info, lines_info, tax_error)
             return None
 
         return response
@@ -753,73 +778,104 @@ class AvataxPlugin(BasePlugin):
     def _set_checkout_tax_error(
         self,
         checkout_info: "CheckoutInfo",
-        lines_info: Iterable["CheckoutLineInfo"],
+        lines_info: list["CheckoutLineInfo"],
+        tax_error_message: str,
     ) -> None:
-        app_identifier = get_tax_app_identifier_for_checkout(checkout_info, lines_info)
+        app_identifier = get_tax_app_identifier_for_checkout(checkout_info)
         if app_identifier == self.PLUGIN_IDENTIFIER:
-            checkout_info.checkout.tax_error = "Empty tax data."
+            checkout_info.checkout.tax_error = tax_error_message
 
     def _get_order_tax_data(
-        self, order: "Order", base_value: Union[Decimal, OrderTaxedPricesData]
+        self, order: "Order", base_value: Decimal | OrderTaxedPricesData
     ):
         if self._skip_plugin(base_value):
-            self._set_order_tax_error(order)
+            self._set_order_tax_error(order, TaxDataErrorMessage.EMPTY)
             return None
 
         valid = _validate_order(order)
         if not valid:
-            self._set_order_tax_error(order)
+            self._set_order_tax_error(order, TaxDataErrorMessage.EMPTY)
             return None
 
         response = get_order_tax_data(order, self.config, False)
         if not response or "error" in response:
-            self._set_order_tax_error(order)
+            self._set_order_tax_error(order, TaxDataErrorMessage.EMPTY)
+            return None
+
+        lines = order.lines.all()
+        if tax_error := self.validate_tax_data(response, lines):
+            self._set_order_tax_error(order, tax_error)
             return None
 
         return response
 
-    def _set_order_tax_error(self, order: "Order") -> None:
+    def _set_order_tax_error(self, order: "Order", tax_error: str) -> None:
         app_identifier = get_tax_app_identifier_for_order(order)
         if app_identifier == self.PLUGIN_IDENTIFIER:
-            order.tax_error = "Empty tax data."
+            order.tax_error = tax_error
 
     @staticmethod
-    def _get_unit_tax_rate(
+    def _get_item_tax_rate(
         response: dict[str, Any],
         item_code: str,
         base_rate: Decimal,
+        related_object_id: str,
+        related_object_type: str,
     ):
         if response is None:
             return base_rate
         lines_data = response.get("lines", [])
         for line in lines_data:
             if line["itemCode"] == item_code:
+                taxable_amount = Decimal(line["taxableAmount"]).quantize(
+                    Decimal(".0001")
+                )
                 details = line.get("details")
                 if not details:
                     return base_rate
+
                 # when tax is equal to 0 tax rate for product is still provided
                 # in the response
-                tax = Decimal(sum([detail.get("tax", 0.0) for detail in details]))
-                rate = Decimal(sum([detail.get("rate", 0.0) for detail in details]))
-                return rate if tax != Decimal(0.0) else base_rate
-        return base_rate
-
-    @staticmethod
-    def _get_shipping_tax_rate(
-        response: dict[str, Any],
-        base_rate: Decimal,
-    ):
-        if response is None:
-            return base_rate
-        lines_data = response.get("lines", [])
-        for line in lines_data:
-            if line["itemCode"] == "Shipping":
-                line_details = line.get("details")
-                if not line_details:
-                    return base_rate
-                return sum(
-                    [Decimal(detail.get("rate", 0.0)) for detail in line_details]
-                )
+                rate = Decimal(0)
+                for detail in details:
+                    if not Decimal(detail.get("tax", 0)):
+                        # When tax is zero, any rate provided in response should not be
+                        # included in returned tax-rate
+                        continue
+                    taxable_amount_from_detail = Decimal(
+                        detail.get("taxableAmount", 0)
+                    ).quantize(Decimal(".0001"))
+                    if (
+                        taxable_amount_from_detail
+                        and taxable_amount_from_detail != taxable_amount
+                    ):
+                        logger.warning(
+                            "taxableAmounts from line.details[] are different than "
+                            "line.taxableAmount. Returning the rate calculated by "
+                            "Saleor. For %s:%s",
+                            related_object_type,
+                            related_object_id,
+                            extra={
+                                "line_taxable_amount": line["taxableAmount"],
+                                "line_details": [
+                                    {
+                                        "tax": log_detail.get("tax"),
+                                        "taxable_amount": log_detail.get(
+                                            "taxableAmount"
+                                        ),
+                                        "rate": log_detail.get("rate"),
+                                    }
+                                    for log_detail in line["details"]
+                                ],
+                                "id": related_object_id,
+                                "type": related_object_type,
+                                "item_code": item_code,
+                                "base_rate": base_rate,
+                            },
+                        )
+                        return base_rate
+                    rate += Decimal(detail.get("rate", 0.0))
+                return rate
         return base_rate
 
     def get_tax_code_from_object_meta(
@@ -852,12 +908,8 @@ class AvataxPlugin(BasePlugin):
             data["name"]: data["value"] for data in plugin_configuration.configuration
         }
         url = urljoin(get_api_url(conf["Use sandbox"]), "utilities/ping")
-        with opentracing.global_tracer().start_active_span(
-            "avatax.utilities.ping"
-        ) as scope:
-            span = scope.span
-            span.set_tag(opentracing.tags.COMPONENT, "tax")
-            span.set_tag("service.name", "avatax")
+        with tracer.start_as_current_span("avatax.utilities.ping") as span:
+            span.set_attribute(saleor_attributes.COMPONENT, "tax")
             response = api_get_request(
                 url,
                 username_or_account=conf["Username or account"],
@@ -891,7 +943,7 @@ class AvataxPlugin(BasePlugin):
         ]
 
         all_address_fields = all(
-            [configuration[field] for field in required_from_address_fields]
+            configuration[field] for field in required_from_address_fields
         )
         if not all_address_fields:
             missing_fields.extend(required_from_address_fields)
@@ -908,3 +960,40 @@ class AvataxPlugin(BasePlugin):
                 )
 
             cls.validate_authentication(plugin_configuration)
+
+    @classmethod
+    def validate_tax_data(cls, tax_data: dict[str, Any], lines: Iterable) -> str:
+        if not tax_data:
+            return TaxDataErrorMessage.EMPTY
+
+        if cls.check_negative_values_in_plugin_tax_data(tax_data):
+            return TaxDataErrorMessage.NEGATIVE_VALUE
+
+        if cls.check_overflows_in_plugin_tax_data(tax_data):
+            return TaxDataErrorMessage.OVERFLOW
+
+        return ""
+
+    @classmethod
+    def check_negative_values_in_plugin_tax_data(cls, tax_data: dict[str, Any]) -> bool:
+        """Check if tax data contains negative values."""
+        if not tax_data:
+            return False
+
+        for line in tax_data.get("lines", []):
+            if line.get("lineAmount", 0) < 0:
+                return True
+
+        return False
+
+    @classmethod
+    def check_overflows_in_plugin_tax_data(cls, tax_data: dict[str, Any]) -> bool:
+        """Check if line prices are lower than a billion."""
+        if not tax_data:
+            return False
+
+        for line in tax_data.get("lines", []):
+            if line.get("lineAmount", 0) > MAXIMUM_PRICE:
+                return True
+
+        return False

@@ -1,5 +1,9 @@
 from decimal import Decimal
 
+import pytest
+
+from saleor.core.prices import quantize_price
+
 from ....core.utils import to_global_id_or_none
 from ....tests.utils import assert_no_permission, get_graphql_content
 
@@ -234,7 +238,7 @@ def test_order_total_refunded_query_with_payment_by_staff_user(
     assert total_refunded["amount"] == first_refund_amount + second_refund_amount
 
 
-def test_order_total_refunded_query_with_payment_by_app(
+def test_order_total_refunded_query_with_partially_refunded_payment_by_app(
     app_api_client, permission_manage_orders, order_with_lines, payment_txn_refunded
 ):
     # given
@@ -260,6 +264,29 @@ def test_order_total_refunded_query_with_payment_by_app(
     order_data = content["data"]["orders"]["edges"][0]["node"]
     total_refunded = order_data["totalRefunded"]
     assert total_refunded["amount"] == first_refund_amount + second_refund_amount
+
+
+def test_order_total_refunded_query_with_fully_refunded_payment_by_app(
+    app_api_client, permission_manage_orders, order_with_lines, payment_txn_refunded
+):
+    # given
+    payment = payment_txn_refunded
+    assert not payment.is_active
+    refund_transaction = payment.transactions.first()
+    assert refund_transaction.amount == payment.total
+
+    app_api_client.app.permissions.set([permission_manage_orders])
+
+    # when
+    response = app_api_client.post_graphql(ORDERS_QUERY_WITH_AMOUNT_FIELDS)
+    content = get_graphql_content(response)
+
+    # then
+    order_data = content["data"]["orders"]["edges"][0]["node"]
+    total_refunded = order_data["totalRefunded"]
+    assert quantize_price(
+        Decimal(total_refunded["amount"]), payment.currency
+    ) == quantize_price(payment.total, payment.currency)
 
 
 def test_order_total_refund_pending_query_with_transactions_by_staff_user(
@@ -815,8 +842,8 @@ def test_order_total_remaining_grant_query_with_transactions_by_staff_user(
     # then
     order_data = content["data"]["orders"]["edges"][0]["node"]
     total_remaining_grant = order_data["totalRemainingGrant"]
-    assert total_remaining_grant["amount"] == granted_refund_amount - (
-        pending_refund_amount + refund_amount
+    assert total_remaining_grant["amount"] == max(
+        granted_refund_amount - (pending_refund_amount + refund_amount), 0
     )
 
 
@@ -873,8 +900,8 @@ def test_order_total_remaining_grant_query_with_transactions_by_app(
     # then
     order_data = content["data"]["orders"]["edges"][0]["node"]
     total_remaining_grant = order_data["totalRemainingGrant"]
-    assert total_remaining_grant["amount"] == granted_refund_amount - (
-        pending_refund_amount + refund_amount
+    assert total_remaining_grant["amount"] == max(
+        granted_refund_amount - (pending_refund_amount + refund_amount), 0
     )
 
 
@@ -958,3 +985,250 @@ def test_order_total_remaining_grant_query_with_payment_by_app(
     assert total_remaining_grant["amount"] == granted_refund_amount - (
         first_refund_amount + second_refund_amount
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "amount_charged",
+        "amount_authorized",
+        "amount_refunded",
+        "amount_canceled",
+        "amount_charge_pending",
+        "amount_authorize_pending",
+        "amount_refund_pending",
+        "amount_cancel_pending",
+        "remaining_grant_amount",
+    ),
+    [
+        ("60", "0", "0", "0", "0", "0", "0", "0", 150),
+        ("0", "60", "0", "0", "0", "0", "0", "0", 150),
+        ("0", "0", "60", "0", "0", "0", "0", "0", 150),
+        ("0", "0", "0", "60", "0", "0", "0", "0", 150),
+        ("0", "0", "0", "0", "60", "0", "0", "0", 150),
+        ("0", "0", "0", "0", "0", "60", "0", "0", 150),
+        ("0", "0", "0", "0", "0", "0", "60", "0", 150),
+        ("0", "0", "0", "0", "0", "0", "0", "60", 150),
+        ("0", "20", "0", "40", "0", "0", "0", "0", 150),
+        ("45", "0", "15", "0", "0", "0", "0", "0", 150),
+        ("-60", "0", "0", "0", "0", "0", "60", "0", 90),
+        ("-60", "0", "60", "0", "0", "0", "0", "0", 90),
+        ("-60", "60", "60", "0", "0", "0", "0", "0", 150),
+    ],
+)
+def test_order_total_remaining_grant_query_with_transactions_total_charged(
+    amount_charged,
+    amount_authorized,
+    amount_refunded,
+    amount_canceled,
+    amount_charge_pending,
+    amount_authorize_pending,
+    amount_refund_pending,
+    amount_cancel_pending,
+    remaining_grant_amount,
+    staff_api_client,
+    permission_group_manage_orders,
+    fulfilled_order,
+    staff_user,
+):
+    # given
+    order = fulfilled_order
+    order_total = Decimal("200.00")
+    order.total_gross_amount = order_total
+    order.total_net_amount = order_total
+    order.save(update_fields=["total_gross_amount", "total_net_amount"])
+
+    granted_refund_amount = Decimal("150.00")
+    order.granted_refunds.create(
+        amount_value=granted_refund_amount,
+        currency="USD",
+        reason="Test reason",
+        user=staff_user,
+    )
+    order.payment_transactions.create(
+        charged_value=Decimal(amount_charged),
+        authorized_value=Decimal(amount_authorized),
+        refunded_value=Decimal(amount_refunded),
+        canceled_value=Decimal(amount_canceled),
+        charge_pending_value=Decimal(amount_charge_pending),
+        authorize_pending_value=Decimal(amount_authorize_pending),
+        refund_pending_value=Decimal(amount_refund_pending),
+        cancel_pending_value=Decimal(amount_cancel_pending),
+        currency="USD",
+    )
+    order.payment_transactions.create(charged_value=order_total, currency="USD")
+    permission_group_manage_orders.user_set.add(staff_api_client.user)
+
+    # when
+    response = staff_api_client.post_graphql(ORDERS_QUERY_WITH_AMOUNT_FIELDS)
+    content = get_graphql_content(response)
+
+    # then
+    order_data = content["data"]["orders"]["edges"][0]["node"]
+    total_remaining_grant = order_data["totalRemainingGrant"]
+    assert total_remaining_grant["amount"] == remaining_grant_amount
+
+
+@pytest.mark.parametrize(
+    (
+        "amount_charged",
+        "amount_authorized",
+        "amount_refunded",
+        "amount_canceled",
+        "amount_charge_pending",
+        "amount_authorize_pending",
+        "amount_refund_pending",
+        "amount_cancel_pending",
+        "remaining_grant_amount",
+    ),
+    [
+        ("60", "0", "0", "0", "0", "0", "0", "0", 10),
+        ("0", "60", "0", "0", "0", "0", "0", "0", 10),
+        ("0", "0", "60", "0", "0", "0", "0", "0", 0),
+        ("0", "0", "0", "60", "0", "0", "0", "0", 0),
+        ("0", "0", "0", "0", "60", "0", "0", "0", 10),
+        ("0", "0", "0", "0", "0", "60", "0", "0", 10),
+        ("0", "0", "0", "0", "0", "0", "60", "0", 0),
+        ("0", "0", "0", "0", "0", "0", "0", "60", 0),
+        ("0", "20", "0", "40", "0", "0", "0", "0", 0),
+        ("0", "80", "0", "40", "0", "0", "0", "0", 30),
+        ("45", "0", "15", "0", "0", "0", "0", "0", 0),
+        ("-60", "0", "0", "0", "0", "0", "60", "0", 0),
+        ("-60", "0", "60", "0", "0", "0", "0", "0", 0),
+        ("-60", "60", "60", "0", "0", "0", "0", "0", 0),
+    ],
+)
+def test_order_total_remaining_grant_query_with_transactions_total_refunded(
+    amount_charged,
+    amount_authorized,
+    amount_refunded,
+    amount_canceled,
+    amount_charge_pending,
+    amount_authorize_pending,
+    amount_refund_pending,
+    amount_cancel_pending,
+    remaining_grant_amount,
+    staff_api_client,
+    permission_group_manage_orders,
+    fulfilled_order,
+    staff_user,
+):
+    # given
+    order = fulfilled_order
+    order_total = Decimal("200.00")
+    order.total_gross_amount = order_total
+    order.total_net_amount = order_total
+    order.save(update_fields=["total_gross_amount", "total_net_amount"])
+
+    granted_refund_amount = Decimal("150.00")
+    order.granted_refunds.create(
+        amount_value=granted_refund_amount,
+        currency="USD",
+        reason="Test reason",
+        user=staff_user,
+    )
+    order.payment_transactions.create(
+        charged_value=Decimal(amount_charged),
+        authorized_value=Decimal(amount_authorized),
+        refunded_value=Decimal(amount_refunded),
+        canceled_value=Decimal(amount_canceled),
+        charge_pending_value=Decimal(amount_charge_pending),
+        authorize_pending_value=Decimal(amount_authorize_pending),
+        refund_pending_value=Decimal(amount_refund_pending),
+        cancel_pending_value=Decimal(amount_cancel_pending),
+        currency="USD",
+    )
+    order.payment_transactions.create(refunded_value=order_total, currency="USD")
+    permission_group_manage_orders.user_set.add(staff_api_client.user)
+
+    # when
+    response = staff_api_client.post_graphql(ORDERS_QUERY_WITH_AMOUNT_FIELDS)
+    content = get_graphql_content(response)
+
+    # then
+    order_data = content["data"]["orders"]["edges"][0]["node"]
+    total_remaining_grant = order_data["totalRemainingGrant"]
+    assert total_remaining_grant["amount"] == remaining_grant_amount
+
+
+@pytest.mark.parametrize(
+    (
+        "amount_charged",
+        "amount_authorized",
+        "amount_refunded",
+        "amount_canceled",
+        "amount_charge_pending",
+        "amount_authorize_pending",
+        "amount_refund_pending",
+        "amount_cancel_pending",
+        "remaining_grant_amount",
+    ),
+    [
+        ("60", "0", "0", "0", "0", "0", "0", "0", 85),
+        ("0", "60", "0", "0", "0", "0", "0", "0", 85),
+        ("0", "0", "60", "0", "0", "0", "0", "0", 25),
+        ("0", "0", "0", "60", "0", "0", "0", "0", 25),
+        ("0", "0", "0", "0", "60", "0", "0", "0", 85),
+        ("0", "0", "0", "0", "0", "60", "0", "0", 85),
+        ("0", "0", "0", "0", "0", "0", "60", "0", 25),
+        ("0", "0", "0", "0", "0", "0", "0", "60", 25),
+        ("0", "20", "0", "40", "0", "0", "0", "0", 45),
+        ("0", "80", "0", "40", "0", "0", "0", "0", 105),
+        ("45", "0", "15", "0", "0", "0", "0", "0", 70),
+        ("-60", "0", "0", "0", "0", "0", "60", "0", 0),
+        ("-60", "0", "60", "0", "0", "0", "0", "0", 0),
+        ("-60", "60", "60", "0", "0", "0", "0", "0", 25),
+    ],
+)
+def test_order_total_remaining_grant_query_with_transactions_partially_refunded(
+    amount_charged,
+    amount_authorized,
+    amount_refunded,
+    amount_canceled,
+    amount_charge_pending,
+    amount_authorize_pending,
+    amount_refund_pending,
+    amount_cancel_pending,
+    remaining_grant_amount,
+    staff_api_client,
+    permission_group_manage_orders,
+    fulfilled_order,
+    staff_user,
+):
+    # given
+    order = fulfilled_order
+    order_total = Decimal("200.00")
+    order.total_gross_amount = order_total
+    order.total_net_amount = order_total
+    order.save(update_fields=["total_gross_amount", "total_net_amount"])
+
+    granted_refund_amount = Decimal("150.00")
+    order.granted_refunds.create(
+        amount_value=granted_refund_amount,
+        currency="USD",
+        reason="Test reason",
+        user=staff_user,
+    )
+    order.payment_transactions.create(
+        charged_value=Decimal(amount_charged),
+        authorized_value=Decimal(amount_authorized),
+        refunded_value=Decimal(amount_refunded),
+        canceled_value=Decimal(amount_canceled),
+        charge_pending_value=Decimal(amount_charge_pending),
+        authorize_pending_value=Decimal(amount_authorize_pending),
+        refund_pending_value=Decimal(amount_refund_pending),
+        cancel_pending_value=Decimal(amount_cancel_pending),
+        currency="USD",
+    )
+    order.payment_transactions.create(
+        refund_pending_value=Decimal(125), charged_value=Decimal(75), currency="USD"
+    )
+    permission_group_manage_orders.user_set.add(staff_api_client.user)
+
+    # when
+    response = staff_api_client.post_graphql(ORDERS_QUERY_WITH_AMOUNT_FIELDS)
+    content = get_graphql_content(response)
+
+    # then
+    order_data = content["data"]["orders"]["edges"][0]["node"]
+    total_remaining_grant = order_data["totalRemainingGrant"]
+    assert total_remaining_grant["amount"] == remaining_grant_amount

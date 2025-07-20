@@ -9,7 +9,10 @@ from ..observability.exceptions import (
     TruncationError,
 )
 from ..observability.payload_schema import ObservabilityEventTypes
-from ..utils import get_webhooks_for_event
+from ..transport.utils import (
+    generate_cache_key_for_webhook,
+)
+from ..utils import get_webhooks_for_event, get_webhooks_for_multiple_events
 
 
 @pytest.fixture
@@ -131,7 +134,7 @@ def test_truncation_error_extra_fields(
     error: type[TruncationError], event_type: ObservabilityEventTypes
 ):
     operation, bytes_limit, payload_size = "operation_name", 100, 102
-    kwargs = dict(extra_kwarg_a="a", extra_kwarg_b="b")
+    kwargs = {"extra_kwarg_a": "a", "extra_kwarg_b": "b"}
     err = error(operation, bytes_limit, payload_size, **kwargs)
     assert str(err)
     assert err.extra == {
@@ -141,3 +144,166 @@ def test_truncation_error_extra_fields(
         "payload_size": payload_size,
         **kwargs,
     }
+
+
+def test_get_webhooks_for_multiple_events(
+    async_app_factory, async_type, setup_checkout_webhooks, app, external_app
+):
+    # given
+    (
+        tax_webhook,
+        shipping_webhook,
+        shipping_filter_webhook,
+        checkout_created_webhook,
+    ) = setup_checkout_webhooks(WebhookEventAsyncType.CHECKOUT_CREATED)
+
+    attribute_created_webhook = app.webhooks.create(
+        name="Attribute webhook",
+        target_url="http://127.0.0.1/test",
+    )
+    attribute_created_webhook.events.create(
+        event_type=WebhookEventAsyncType.ATTRIBUTE_CREATED
+    )
+    second_attribute_created_webhook = app.webhooks.create(
+        name="Second attribute webhook",
+        target_url="http://127.0.0.1/test",
+    )
+    second_attribute_created_webhook.events.create(
+        event_type=WebhookEventAsyncType.ATTRIBUTE_CREATED
+    )
+
+    disabled_webhook = app.webhooks.create(
+        name="Attribute webhook", target_url="http://127.0.0.1/test", is_active=False
+    )
+    disabled_webhook.events.create(event_type=WebhookEventAsyncType.ATTRIBUTE_CREATED)
+
+    not_active_app = external_app
+    not_active_app.is_active = False
+    not_active_app.save()
+
+    not_active_webhook = not_active_app.webhooks.create(
+        name="Attribute webhook",
+        target_url="http://127.0.0.1/test",
+    )
+    not_active_webhook.events.create(event_type=WebhookEventAsyncType.ATTRIBUTE_CREATED)
+
+    # when
+    webhook_map = get_webhooks_for_multiple_events(
+        [
+            WebhookEventAsyncType.CHECKOUT_CREATED,
+            WebhookEventAsyncType.ATTRIBUTE_CREATED,
+            WebhookEventSyncType.CHECKOUT_CALCULATE_TAXES,
+            WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT,
+            WebhookEventSyncType.CHECKOUT_FILTER_SHIPPING_METHODS,
+            WebhookEventAsyncType.ORDER_CREATED,
+        ]
+    )
+
+    # then
+    assert dict(webhook_map) == {
+        WebhookEventAsyncType.ANY: set(),
+        WebhookEventAsyncType.ORDER_CREATED: set(),
+        WebhookEventAsyncType.CHECKOUT_CREATED: {checkout_created_webhook},
+        WebhookEventAsyncType.ATTRIBUTE_CREATED: {
+            attribute_created_webhook,
+            second_attribute_created_webhook,
+        },
+        WebhookEventSyncType.CHECKOUT_CALCULATE_TAXES: {tax_webhook},
+        WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT: {shipping_webhook},
+        WebhookEventSyncType.CHECKOUT_FILTER_SHIPPING_METHODS: {
+            shipping_filter_webhook
+        },
+    }
+
+
+def test_different_target_urls_produce_different_cache_key(checkout_with_item):
+    # given
+    target_url_1 = "http://example.com/1"
+    target_url_2 = "http://example.com/2"
+
+    payload = {"field": "1", "field2": "2"}
+
+    # when
+    cache_key_1 = generate_cache_key_for_webhook(
+        payload,
+        target_url_1,
+        WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT,
+        1,
+    )
+    cache_key_2 = generate_cache_key_for_webhook(
+        payload,
+        target_url_2,
+        WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT,
+        1,
+    )
+
+    # then
+    assert cache_key_1 != cache_key_2
+
+
+def test_different_payload_produce_different_cache_key(checkout_with_item):
+    # given
+    target_url = "http://example.com/1"
+
+    payload_1 = {"field": "1", "field2": "2"}
+    payload_2 = {"field": "1", "field2": "3"}
+
+    # when
+    cache_key_1 = generate_cache_key_for_webhook(
+        payload_1,
+        target_url,
+        WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT,
+        1,
+    )
+    cache_key_2 = generate_cache_key_for_webhook(
+        payload_2,
+        target_url,
+        WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT,
+        1,
+    )
+
+    # then
+    assert cache_key_1 != cache_key_2
+
+
+def test_different_event_produce_different_cache_key(checkout_with_item):
+    # given
+    target_url = "http://example.com/1"
+
+    payload = {"field": "1", "field2": "2"}
+
+    # when
+    cache_key_1 = generate_cache_key_for_webhook(
+        payload, target_url, WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT, 1
+    )
+    cache_key_2 = generate_cache_key_for_webhook(
+        payload, target_url, WebhookEventSyncType.LIST_STORED_PAYMENT_METHODS, 1
+    )
+
+    # then
+    assert cache_key_1 != cache_key_2
+
+
+def test_different_app_produce_different_cache_key():
+    # given
+    target_url = "http://example.com/1"
+    first_app_id = 1
+    second_app_id = 2
+    payload = {"field": "1", "field2": "2"}
+
+    # when
+    cache_key_1 = generate_cache_key_for_webhook(
+        payload,
+        target_url,
+        WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT,
+        first_app_id,
+    )
+    cache_key_2 = generate_cache_key_for_webhook(
+        payload,
+        target_url,
+        WebhookEventSyncType.SHIPPING_LIST_METHODS_FOR_CHECKOUT,
+        second_app_id,
+    )
+
+    # then
+    assert cache_key_1 != cache_key_2

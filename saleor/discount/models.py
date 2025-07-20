@@ -1,23 +1,20 @@
-from datetime import datetime
+import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from functools import partial
 from typing import TYPE_CHECKING, Optional
 from uuid import uuid4
 
-import pytz
 from django.conf import settings
 from django.contrib.postgres.indexes import BTreeIndex, GinIndex
 from django.db import connection, models
 from django.db.models import Exists, JSONField, OuterRef, Q, Subquery, Sum
 from django.utils import timezone
 from django_countries.fields import CountryField
-from django_prices.models import MoneyField
-from django_prices.templatetags.prices import amount
 from prices import Money, fixed_discount, percentage_discount
 
 from ..app.models import App
 from ..channel.models import Channel
-from ..core.db.fields import SanitizedJSONField
+from ..core.db.fields import MoneyField, SanitizedJSONField
 from ..core.models import ModelWithMetadata
 from ..core.utils.editorjs import clean_editor_js
 from ..core.utils.json_serializer import CustomJsonEncoder
@@ -56,8 +53,10 @@ class VoucherQueryset(models.QuerySet["Voucher"]):
     def active(self, date):
         subquery = (
             VoucherCode.objects.filter(voucher_id=OuterRef("pk"))
+            .order_by()
+            .values("voucher_id")
             .annotate(total_used=Sum("used"))
-            .values("total_used")[:1]
+            .values("total_used")
         )
         return self.filter(
             Q(usage_limit__isnull=True) | Q(usage_limit__gt=Subquery(subquery)),
@@ -80,8 +79,10 @@ class VoucherQueryset(models.QuerySet["Voucher"]):
     def expired(self, date):
         subquery = (
             VoucherCode.objects.filter(voucher_id=OuterRef("pk"))
+            .order_by()
+            .values("voucher_id")
             .annotate(total_used=Sum("used"))
-            .values("total_used")[:1]
+            .values("total_used")
         )
         return self.filter(
             Q(usage_limit__lte=Subquery(subquery)) | Q(end_date__lt=date),
@@ -133,6 +134,10 @@ class Voucher(ModelWithMetadata):
         code_instance = self.codes.last()
         return code_instance.code if code_instance else None
 
+    @property
+    def promo_codes(self):
+        return list(self.codes.values_list("code", flat=True))
+
     def get_discount(self, channel: Channel):
         """Return proper discount amount for given channel.
 
@@ -160,7 +165,7 @@ class Voucher(ModelWithMetadata):
             )
         raise NotImplementedError("Unknown discount type")
 
-    def get_discount_amount_for(self, price: Money, channel: Channel):
+    def get_discount_amount_for(self, price: Money, channel: Channel) -> Money:
         discount = self.get_discount(channel)
         after_discount = discount(price)
         if after_discount.amount < 0:
@@ -173,7 +178,8 @@ class Voucher(ModelWithMetadata):
             raise NotApplicable("This voucher is not assigned to this channel")
         min_spent = voucher_channel_listing.min_spent
         if min_spent and value < min_spent:
-            msg = f"This offer is only valid for orders over {amount(min_spent)}."
+            target = min_spent.quantize()
+            msg = f"This offer is only valid for orders over {target.amount} {target.currency}."
             raise NotApplicable(msg, min_spent=min_spent)
 
     def validate_min_checkout_items_quantity(self, quantity):
@@ -341,7 +347,7 @@ class Promotion(ModelWithMetadata):
 
     def is_active(self, date=None):
         if date is None:
-            date = datetime.now(pytz.utc)
+            date = datetime.datetime.now(tz=datetime.UTC)
         return (not self.end_date or self.end_date >= date) and self.start_date <= date
 
     def assign_old_sale_id(self):

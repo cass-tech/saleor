@@ -1,7 +1,7 @@
-from collections import defaultdict, namedtuple
+import datetime
+from collections import defaultdict
 from collections.abc import Iterable
-from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, NamedTuple
 
 from django.conf import settings
 from django.db.models import F, Sum
@@ -11,14 +11,18 @@ from django.utils import timezone
 from ..core.exceptions import InsufficientStock, InsufficientStockData
 from ..core.tracing import traced_atomic_transaction
 from ..product.models import ProductVariant, ProductVariantChannelListing
+from .lock_objects import stock_qs_select_for_update
 from .management import sort_stocks
-from .models import Allocation, PreorderReservation, Reservation, Stock
+from .models import Allocation, PreorderReservation, Reservation
 
 if TYPE_CHECKING:
     from ..channel.models import Channel
     from ..checkout.fetch import CheckoutLine
 
-StockData = namedtuple("StockData", ["pk", "quantity"])
+
+class StockData(NamedTuple):
+    pk: int
+    quantity: int
 
 
 @traced_atomic_transaction()
@@ -47,7 +51,7 @@ def reserve_stocks_and_preorders(
         else:
             stock_lines.append(line)
 
-    reserved_until = timezone.now() + timedelta(minutes=length_in_minutes)
+    reserved_until = timezone.now() + datetime.timedelta(minutes=length_in_minutes)
 
     if stock_lines:
         reserve_stocks(
@@ -87,7 +91,7 @@ def reserve_stocks(
     variants: Iterable["ProductVariant"],
     country_code: str,
     channel: "Channel",
-    reserved_until: datetime,
+    reserved_until: datetime.datetime,
     *,
     replace: bool = True,
 ):
@@ -103,7 +107,7 @@ def reserve_stocks(
         return
 
     stocks = list(
-        Stock.objects.select_for_update(of=("self",))
+        stock_qs_select_for_update()
         .get_variants_stocks_for_country(country_code, channel.slug, variants)
         .order_by("pk")
         .values("id", "product_variant", "pk", "quantity", "warehouse_id")
@@ -183,7 +187,7 @@ def _create_stock_reservations(
     quantity_allocation_for_stocks: dict,
     quantity_reservation_for_stocks: dict,
     insufficient_stocks: list[InsufficientStockData],
-    reserved_until: datetime,
+    reserved_until: datetime.datetime,
 ) -> tuple[list[InsufficientStockData], list[Reservation]]:
     quantity = line.quantity
     quantity_reserved = 0
@@ -237,7 +241,7 @@ def reserve_preorders(
     variants: Iterable["ProductVariant"],
     country_code: str,
     channel_slug: str,
-    reserved_until: datetime,
+    reserved_until: datetime.datetime,
     *,
     replace: bool = True,
 ):
@@ -279,7 +283,7 @@ def reserve_preorders(
 
     variants_global_allocations = {
         variant_id: sum(
-            channel_listing.preorder_quantity_allocated  # type: ignore
+            channel_listing.preorder_quantity_allocated  # type: ignore[attr-defined]
             for channel_listing in channel_listings
         )
         for variant_id, channel_listings in variant_channels.items()
@@ -324,10 +328,10 @@ def _create_preorder_reservation(
     global_allocations: int,
     listings_reservations: dict[int, int],
     insufficient_stocks: list[InsufficientStockData],
-    reserved_until: datetime,
+    reserved_until: datetime.datetime,
 ):
     if listing.preorder_quantity_threshold is not None:
-        available_channel_quantity = listing.available_preorder_quantity  # type: ignore
+        available_channel_quantity = listing.available_preorder_quantity  # type: ignore[attr-defined]
         available_channel_quantity = max(
             available_channel_quantity - listings_reservations[listing.id], 0
         )
@@ -393,14 +397,14 @@ def is_reservation_enabled(settings) -> bool:
     )
 
 
-def get_reservation_length(site, user) -> Optional[int]:
+def get_reservation_length(site, user) -> int | None:
     if user:
         return site.settings.reserve_stock_duration_authenticated_user
     return site.settings.reserve_stock_duration_anonymous_user
 
 
 def get_listings_reservations(
-    checkout_lines: Optional[Iterable["CheckoutLine"]],
+    checkout_lines: Iterable["CheckoutLine"] | None,
     all_variants_channel_listings,
     database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
 ) -> dict[int, int]:

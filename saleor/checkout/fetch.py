@@ -1,20 +1,24 @@
 import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import cached_property, singledispatch
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Optional,
-    Union,
-)
+from typing import TYPE_CHECKING, Any, Optional, Union
 from uuid import UUID
 
 from django.conf import settings
+from prices import Money
 
-from ..discount import DiscountType, VoucherType
-from ..discount.interface import fetch_variant_rules_info, fetch_voucher_info
+from ..core.db.connection import allow_writer
+from ..core.prices import quantize_price
+from ..core.pricing.interface import LineInfo
+from ..core.taxes import zero_money
+from ..discount import VoucherType
+from ..discount.interface import (
+    VariantPromotionRuleInfo,
+    fetch_variant_rules_info,
+    fetch_voucher_info,
+)
 from ..shipping.interface import ShippingMethodData
 from ..shipping.models import ShippingMethod, ShippingMethodChannelListing
 from ..shipping.utils import (
@@ -23,11 +27,12 @@ from ..shipping.utils import (
 )
 from ..warehouse import WarehouseClickAndCollectOption
 from ..warehouse.models import Warehouse
+from ..webhook.transport.shipping_helpers import convert_to_app_id_with_identifier
 
 if TYPE_CHECKING:
     from ..account.models import Address, User
     from ..channel.models import Channel
-    from ..discount.interface import VariantPromotionRuleInfo, VoucherInfo
+    from ..checkout.models import CheckoutLine
     from ..discount.models import (
         CheckoutDiscount,
         CheckoutLineDiscount,
@@ -36,7 +41,6 @@ if TYPE_CHECKING:
     )
     from ..plugins.manager import PluginsManager
     from ..product.models import (
-        Collection,
         Product,
         ProductChannelListing,
         ProductType,
@@ -44,36 +48,69 @@ if TYPE_CHECKING:
         ProductVariantChannelListing,
     )
     from ..tax.models import TaxClass, TaxConfiguration
-    from .models import Checkout, CheckoutLine
+    from .models import Checkout
 
 
 @dataclass
-class CheckoutLineInfo:
+class CheckoutLineInfo(LineInfo):
     line: "CheckoutLine"
     variant: "ProductVariant"
-    channel_listing: "ProductVariantChannelListing"
     product: "Product"
     product_type: "ProductType"
-    collections: list["Collection"]
     discounts: list["CheckoutLineDiscount"]
     rules_info: list["VariantPromotionRuleInfo"]
-    channel: "Channel"
+    channel_listing: Optional["ProductVariantChannelListing"]
+
     tax_class: Optional["TaxClass"] = None
-    voucher: Optional["Voucher"] = None
 
-    def get_promotion_discounts(self) -> list["CheckoutLineDiscount"]:
-        return [
-            discount
-            for discount in self.discounts
-            if discount.type in [DiscountType.PROMOTION, DiscountType.ORDER_PROMOTION]
-        ]
+    @cached_property
+    def variant_discounted_price(self) -> Money:
+        """Return the discounted variant price.
 
-    def get_catalogue_discounts(self) -> list["CheckoutLineDiscount"]:
-        return [
-            discount
-            for discount in self.discounts
-            if discount.type == DiscountType.PROMOTION
-        ]
+        `variant_discounted_price` means price with the most beneficial applicable
+        catalogue promotion.
+        If listing is present return the discounted price from the listing,
+        if listing is not present, calculate current unit price based on
+        `undiscounted_unit_price` and catalogue promotion discounts.
+        """
+
+        # if price_override is set, it takes precedence over any other price for
+        # further calculations
+        if self.line.price_override is not None:
+            return Money(self.line.price_override, self.line.currency)
+
+        if self.channel_listing and self.channel_listing.discounted_price is not None:
+            return self.channel_listing.discounted_price
+
+        catalogue_discounts = self.get_catalogue_discounts()
+        total_price = self.undiscounted_unit_price * self.line.quantity
+        for discount in catalogue_discounts:
+            total_price -= discount.amount
+
+        unit_price = max(
+            total_price / self.line.quantity, zero_money(self.line.currency)
+        )
+        return quantize_price(unit_price, self.line.currency)
+
+    @cached_property
+    def undiscounted_unit_price(self) -> Money:
+        """Provide undiscounted unit price.
+
+        Return the undiscounted variant price when listing is present. If variant
+        doesn't have listing, use denormalized price.
+        """
+        if self.channel_listing and self.channel_listing.price is not None:
+            return self.variant.get_base_price(
+                self.channel_listing, self.line.price_override
+            )
+        return self.line.undiscounted_unit_price
+
+    @cached_property
+    def prior_unit_price_amount(self) -> Decimal | None:
+        """Provide prior unit price."""
+        if self.channel_listing and self.channel_listing.price is not None:
+            return self.variant.get_prior_price_amount(self.channel_listing)
+        return self.line.prior_unit_price_amount
 
 
 @dataclass
@@ -86,30 +123,69 @@ class CheckoutInfo:
     shipping_address: Optional["Address"]
     tax_configuration: "TaxConfiguration"
     discounts: list["CheckoutDiscount"]
-    lines: Iterable[CheckoutLineInfo]
+    lines: list[CheckoutLineInfo]
     shipping_channel_listings: list["ShippingMethodChannelListing"]
     shipping_method: Optional["ShippingMethod"] = None
     collection_point: Optional["Warehouse"] = None
     voucher: Optional["Voucher"] = None
     voucher_code: Optional["VoucherCode"] = None
     database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME
+    pregenerated_payloads_for_excluded_shipping_method: dict | None = None
 
-    @cached_property
-    def all_shipping_methods(self) -> list["ShippingMethodData"]:
-        all_methods = get_all_shipping_methods_list(
-            self,
-            self.shipping_address,
-            self.lines,
-            self.shipping_channel_listings,
-            self.manager,
-            self.database_connection_name,
-        )
-        # Filter shipping methods using sync webhooks
-        excluded_methods = self.manager.excluded_shipping_methods_for_checkout(
-            self.checkout,
-            self.channel,
-            all_methods,
-        )
+    allow_sync_webhooks: bool = True
+    _cached_built_in_shipping_methods: list[ShippingMethodData] | None = None
+    _cached_external_shipping_methods: list[ShippingMethodData] | None = None
+
+    def get_all_shipping_methods(
+        self,
+    ) -> list["ShippingMethodData"]:
+        """Return list of all available shipping methods.
+
+        If self.allow_sync_webhooks is set to False, any external calls will be skipped.
+        If self.allow_sync_webhooks is set to True, the external calls like: external
+        shipping methods or exclude shipping methods will be called.
+
+        The fetched values are stored in self object to remove any additional
+        external/DB calls.
+        """
+        if (
+            self._cached_external_shipping_methods is not None
+            and self._cached_built_in_shipping_methods is not None
+        ):
+            return (
+                self._cached_built_in_shipping_methods
+                + self._cached_external_shipping_methods
+            )
+
+        if (
+            not self.allow_sync_webhooks
+            and self._cached_built_in_shipping_methods is not None
+        ):
+            return self._cached_built_in_shipping_methods
+
+        if self._cached_built_in_shipping_methods is None:
+            self._cached_built_in_shipping_methods = (
+                get_available_built_in_shipping_methods_for_checkout_info(self)
+            )
+
+        if not self.allow_sync_webhooks:
+            excluded_methods = []
+            all_methods = self._cached_built_in_shipping_methods
+        else:
+            self._cached_external_shipping_methods = (
+                get_external_shipping_methods_for_checkout_info(self)
+            )
+            all_methods = (
+                self._cached_built_in_shipping_methods
+                + self._cached_external_shipping_methods
+            )
+            # Filter shipping methods using sync webhooks
+            excluded_methods = self.manager.excluded_shipping_methods_for_checkout(
+                self.checkout,
+                self.channel,
+                all_methods,
+                self.pregenerated_payloads_for_excluded_shipping_method,
+            )
         initialize_shipping_method_active_status(all_methods, excluded_methods)
         return all_methods
 
@@ -123,12 +199,37 @@ class CheckoutInfo:
             )
         )
 
-    @property
-    def delivery_method_info(self) -> "DeliveryMethodBase":
-        from ..webhook.transport.shipping import convert_to_app_id_with_identifier
+    def _update_denormalized_shipping_method_fields(
+        self, delivery_method: ShippingMethodData | Warehouse
+    ):
+        checkout = self.checkout
+        fields_to_update = []
+        if isinstance(delivery_method, ShippingMethodData):
+            new_shipping_method_name = delivery_method.name
+            new_shipping_price = delivery_method.price
+        else:
+            new_shipping_method_name = None
+            new_shipping_price = zero_money(checkout.currency)
+
+        if checkout.shipping_method_name != new_shipping_method_name:
+            checkout.shipping_method_name = new_shipping_method_name
+            fields_to_update.append("shipping_method_name")
+        current_shipping_price = quantize_price(
+            checkout.undiscounted_base_shipping_price, checkout.currency
+        )
+        new_shipping_price = quantize_price(new_shipping_price, checkout.currency)
+        if current_shipping_price != new_shipping_price:
+            checkout.undiscounted_base_shipping_price_amount = new_shipping_price.amount
+            fields_to_update.append("undiscounted_base_shipping_price_amount")
+
+        if fields_to_update:
+            with allow_writer():
+                checkout.save(update_fields=fields_to_update)
+
+    def get_delivery_method_info(self) -> "DeliveryMethodBase":
         from .utils import get_external_shipping_id
 
-        delivery_method: Optional[Union[ShippingMethodData, Warehouse, Callable]] = None
+        delivery_method: ShippingMethodData | Warehouse | None = None
 
         if self.shipping_method:
             # Find listing for the currently selected shipping method
@@ -144,26 +245,38 @@ class CheckoutInfo:
                 )
 
         elif external_shipping_method_id := get_external_shipping_id(self.checkout):
-
-            def _resolve_external_method():
-                methods = {method.id: method for method in self.all_shipping_methods}
+            if self.allow_sync_webhooks:
+                methods = {
+                    method.id: method for method in self.get_all_shipping_methods()
+                }
                 if method := methods.get(external_shipping_method_id):
-                    return method
-                new_shipping_method_id = convert_to_app_id_with_identifier(
-                    external_shipping_method_id
+                    delivery_method = method
+                else:
+                    new_shipping_method_id = convert_to_app_id_with_identifier(
+                        external_shipping_method_id
+                    )
+                    if new_shipping_method_id is None:
+                        delivery_method = None
+                    else:
+                        delivery_method = methods.get(new_shipping_method_id)
+            else:
+                delivery_method = ShippingMethodData(
+                    id=get_external_shipping_id(self.checkout),
+                    name=self.checkout.shipping_method_name or "",
+                    price=self.checkout.undiscounted_base_shipping_price,
                 )
-                return methods.get(new_shipping_method_id)
-
-            delivery_method = _resolve_external_method
 
         else:
             delivery_method = self.collection_point
+
+        if isinstance(delivery_method, ShippingMethodData):
+            self._update_denormalized_shipping_method_fields(delivery_method)
 
         return get_delivery_method_info(delivery_method, self.shipping_address)
 
     @property
     def valid_shipping_methods(self) -> list["ShippingMethodData"]:
-        return [method for method in self.all_shipping_methods if method.active]
+        return [method for method in self.get_all_shipping_methods() if method.active]
 
     @property
     def valid_delivery_methods(
@@ -182,18 +295,22 @@ class CheckoutInfo:
             return self.checkout.country.code
         return address.country.code
 
-    def get_customer_email(self) -> Optional[str]:
-        return self.user.email if self.user else self.checkout.email
+    def get_customer_email(self) -> str | None:
+        if self.checkout.email:
+            return self.checkout.email
+        if self.user:
+            return self.user.email
+        return None
 
 
 @dataclass(frozen=True)
 class DeliveryMethodBase:
-    delivery_method: Optional[Union["ShippingMethodData", "Warehouse"]] = None
+    delivery_method: Union["ShippingMethodData", "Warehouse"] | None = None
     shipping_address: Optional["Address"] = None
     store_as_customer_address: bool = False
 
     @property
-    def warehouse_pk(self) -> Optional[UUID]:
+    def warehouse_pk(self) -> UUID | None:
         pass
 
     @property
@@ -205,7 +322,7 @@ class DeliveryMethodBase:
         return False
 
     @property
-    def delivery_method_name(self) -> dict[str, Optional[str]]:
+    def delivery_method_name(self) -> dict[str, str | None]:
         return {"shipping_method_name": None}
 
     def get_warehouse_filter_lookup(self) -> dict[str, Any]:
@@ -217,6 +334,9 @@ class DeliveryMethodBase:
     def is_method_in_valid_methods(self, checkout_info: "CheckoutInfo") -> bool:
         return False
 
+    def is_delivery_method_set(self) -> bool:
+        return bool(self.delivery_method)
+
 
 @dataclass(frozen=True)
 class ShippingMethodInfo(DeliveryMethodBase):
@@ -225,7 +345,7 @@ class ShippingMethodInfo(DeliveryMethodBase):
     store_as_customer_address: bool = True
 
     @property
-    def delivery_method_name(self) -> dict[str, Optional[str]]:
+    def delivery_method_name(self) -> dict[str, str | None]:
         return {"shipping_method_name": str(self.delivery_method.name)}
 
     @property
@@ -265,7 +385,7 @@ class CollectionPointInfo(DeliveryMethodBase):
         )
 
     @property
-    def delivery_method_name(self) -> dict[str, Optional[str]]:
+    def delivery_method_name(self) -> dict[str, str | None]:
         return {"collection_point_name": str(self.delivery_method)}
 
     def get_warehouse_filter_lookup(self) -> dict[str, Any]:
@@ -290,17 +410,18 @@ class CollectionPointInfo(DeliveryMethodBase):
 
 @singledispatch
 def get_delivery_method_info(
-    delivery_method: Optional[Union["ShippingMethodData", "Warehouse", Callable]],
+    delivery_method: Union["ShippingMethodData", "Warehouse"] | None,
     address: Optional["Address"] = None,
 ) -> DeliveryMethodBase:
-    if callable(delivery_method):
-        delivery_method = delivery_method()
     if delivery_method is None:
         return DeliveryMethodBase()
     if isinstance(delivery_method, ShippingMethodData):
         return ShippingMethodInfo(delivery_method, address)
     if isinstance(delivery_method, Warehouse):
-        return CollectionPointInfo(delivery_method, delivery_method.address)
+        # TODO: Workaround for lack of using in tests.
+        # The warehouse address should be loaded when CheckoutInfo is created.
+        with allow_writer():
+            return CollectionPointInfo(delivery_method, delivery_method.address)
 
     raise NotImplementedError()
 
@@ -312,8 +433,9 @@ def fetch_checkout_lines(
     skip_recalculation: bool = False,
     voucher: Optional["Voucher"] = None,
     database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
-) -> tuple[Iterable[CheckoutLineInfo], Iterable[int]]:
+) -> tuple[list[CheckoutLineInfo], list[int]]:
     """Fetch checkout lines as CheckoutLineInfo objects."""
+    from ..discount.utils.voucher import attach_voucher_to_line_info
     from .utils import get_voucher_for_checkout
 
     select_related_fields = ["variant__product__product_type__tax_class"]
@@ -339,7 +461,7 @@ def fetch_checkout_lines(
     )
     lines_info = []
     unavailable_variant_pks = []
-    product_channel_listing_mapping: dict[int, Optional["ProductChannelListing"]] = {}
+    product_channel_listing_mapping: dict[int, ProductChannelListing | None] = {}
     channel = checkout.channel
 
     for line in lines:
@@ -363,21 +485,22 @@ def fetch_checkout_lines(
             checkout, product, variant_channel_listing, product_channel_listing_mapping
         ):
             unavailable_variant_pks.append(variant.pk)
-            if not skip_lines_with_unavailable_variants:
-                lines_info.append(
-                    CheckoutLineInfo(
-                        line=line,
-                        variant=variant,
-                        channel_listing=variant_channel_listing,
-                        product=product,
-                        product_type=product_type,
-                        collections=collections,
-                        tax_class=product.tax_class or product_type.tax_class,
-                        discounts=discounts,
-                        rules_info=rules_info,
-                        channel=channel,
-                    )
+            lines_info.append(
+                CheckoutLineInfo(
+                    line=line,
+                    variant=variant,
+                    channel_listing=variant_channel_listing,
+                    product=product,
+                    product_type=product_type,
+                    collections=collections,
+                    tax_class=product.tax_class or product_type.tax_class,
+                    discounts=discounts,
+                    rules_info=rules_info,
+                    channel=channel,
+                    voucher=None,
+                    voucher_code=None,
                 )
+            )
             continue
 
         lines_info.append(
@@ -392,6 +515,8 @@ def fetch_checkout_lines(
                 discounts=discounts,
                 rules_info=rules_info,
                 channel=channel,
+                voucher=None,
+                voucher_code=None,
             )
         )
 
@@ -408,12 +533,14 @@ def fetch_checkout_lines(
             # discount from voucher
             return lines_info, unavailable_variant_pks
         if voucher.type == VoucherType.SPECIFIC_PRODUCT or voucher.apply_once_per_order:
-            voucher_info = fetch_voucher_info(voucher)
-            apply_voucher_to_checkout_line(voucher_info, lines_info)
+            voucher_info = fetch_voucher_info(voucher, checkout.voucher_code)
+            attach_voucher_to_line_info(voucher_info, lines_info)
     return lines_info, unavailable_variant_pks
 
 
-def get_variant_channel_listing(variant: "ProductVariant", channel_id: int):
+def get_variant_channel_listing(
+    variant: "ProductVariant", channel_id: int
+) -> Optional["ProductVariantChannelListing"]:
     variant_channel_listing = None
     for channel_listing in variant.channel_listings.all():
         if channel_listing.channel_id == channel_id:
@@ -421,26 +548,38 @@ def get_variant_channel_listing(variant: "ProductVariant", channel_id: int):
     return variant_channel_listing
 
 
-def _is_variant_valid(
+def _product_channel_listing_is_valid(
     checkout: "Checkout",
     product: "Product",
-    variant_channel_listing: "ProductVariantChannelListing",
     product_channel_listing_mapping: dict,
 ):
-    if not variant_channel_listing or variant_channel_listing.price is None:
-        return False
-
     product_channel_listing = _get_product_channel_listing(
         product_channel_listing_mapping, checkout.channel_id, product
     )
-
     if (
         not product_channel_listing
         or product_channel_listing.is_available_for_purchase() is False
         or not product_channel_listing.is_visible
     ):
         return False
+    return True
 
+
+def _is_variant_valid(
+    checkout: "Checkout",
+    product: "Product",
+    variant_channel_listing: Optional["ProductVariantChannelListing"],
+    product_channel_listing_mapping: dict,
+):
+    if not variant_channel_listing or variant_channel_listing.price is None:
+        return False
+
+    if not _product_channel_listing_is_valid(
+        checkout,
+        product,
+        product_channel_listing_mapping,
+    ):
+        return False
     return True
 
 
@@ -450,57 +589,17 @@ def _get_product_channel_listing(
     product_channel_listing = product_channel_listing_mapping.get(product.id)
     if product.id not in product_channel_listing_mapping:
         for channel_listing in product.channel_listings.all():
-            if channel_listing.channel_id == channel_id:  # type: ignore[attr-defined]
+            if channel_listing.channel_id == channel_id:
                 product_channel_listing = channel_listing
         product_channel_listing_mapping[product.id] = product_channel_listing
     return product_channel_listing
 
 
-def apply_voucher_to_checkout_line(
-    voucher_info: "VoucherInfo",
-    lines_info: Iterable[CheckoutLineInfo],
-):
-    """Attach voucher to valid checkout lines info.
-
-    Apply a voucher to checkout line info when the voucher has the type
-    SPECIFIC_PRODUCTS or is applied only to the cheapest item.
-    """
-    from .utils import get_discounted_lines
-
-    voucher = voucher_info.voucher
-    discounted_lines_by_voucher: list[CheckoutLineInfo] = []
-    lines_included_in_discount = lines_info
-    if voucher.type == VoucherType.SPECIFIC_PRODUCT:
-        discounted_lines_by_voucher.extend(
-            get_discounted_lines(lines_info, voucher_info)
-        )
-        lines_included_in_discount = discounted_lines_by_voucher
-    if voucher.apply_once_per_order:
-        cheapest_line = _get_the_cheapest_line(lines_included_in_discount)
-        if cheapest_line:
-            discounted_lines_by_voucher = [cheapest_line]
-    for line_info in lines_info:
-        if line_info in discounted_lines_by_voucher:
-            line_info.voucher = voucher
-
-
-def _get_the_cheapest_line(
-    lines_info: Optional[Iterable[CheckoutLineInfo]],
-) -> Optional[CheckoutLineInfo]:
-    if not lines_info:
-        return None
-    return min(
-        lines_info, key=lambda line_info: line_info.channel_listing.discounted_price
-    )
-
-
 def fetch_checkout_info(
     checkout: "Checkout",
-    lines: Iterable[CheckoutLineInfo],
+    lines: list[CheckoutLineInfo],
     manager: "PluginsManager",
-    shipping_channel_listings: Optional[
-        Iterable["ShippingMethodChannelListing"]
-    ] = None,
+    shipping_channel_listings: Iterable["ShippingMethodChannelListing"] | None = None,
     voucher: Optional["Voucher"] = None,
     voucher_code: Optional["VoucherCode"] = None,
     database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
@@ -541,17 +640,13 @@ def fetch_checkout_info(
     return checkout_info
 
 
-def get_valid_internal_shipping_method_list_for_checkout_info(
+def get_available_built_in_shipping_methods_for_checkout_info(
     checkout_info: "CheckoutInfo",
-    shipping_address: Optional["Address"],
-    lines: Iterable[CheckoutLineInfo],
-    shipping_channel_listings: Iterable[ShippingMethodChannelListing],
-    database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
 ) -> list["ShippingMethodData"]:
     from . import base_calculations
-    from .utils import get_valid_internal_shipping_methods_for_checkout
+    from .utils import get_valid_internal_shipping_methods_for_checkout_info
 
-    country_code = shipping_address.country.code if shipping_address else None
+    lines = checkout_info.lines
 
     subtotal = base_calculations.base_checkout_subtotal(
         lines,
@@ -574,38 +669,32 @@ def get_valid_internal_shipping_method_list_for_checkout_info(
     if not is_shipping_voucher and not is_voucher_for_specific_product:
         subtotal -= checkout_info.checkout.discount
 
-    valid_shipping_methods = get_valid_internal_shipping_methods_for_checkout(
+    valid_shipping_methods = get_valid_internal_shipping_methods_for_checkout_info(
         checkout_info,
-        lines,
         subtotal,
-        shipping_channel_listings,
-        country_code=country_code,
-        database_connection_name=database_connection_name,
     )
 
     return valid_shipping_methods
 
 
+def get_external_shipping_methods_for_checkout_info(
+    checkout_info,
+) -> list[ShippingMethodData]:
+    manager = checkout_info.manager
+    return manager.list_shipping_methods_for_checkout(
+        checkout=checkout_info.checkout, channel_slug=checkout_info.channel.slug
+    )
+
+
 def get_all_shipping_methods_list(
     checkout_info,
-    shipping_address,
-    lines,
-    shipping_channel_listings,
-    manager,
-    database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
 ):
     return list(
         itertools.chain(
-            get_valid_internal_shipping_method_list_for_checkout_info(
+            get_available_built_in_shipping_methods_for_checkout_info(
                 checkout_info,
-                shipping_address,
-                lines,
-                shipping_channel_listings,
-                database_connection_name=database_connection_name,
             ),
-            manager.list_shipping_methods_for_checkout(
-                checkout=checkout_info.checkout, channel_slug=checkout_info.channel.slug
-            ),
+            get_external_shipping_methods_for_checkout_info(checkout_info),
         )
     )
 
@@ -615,7 +704,7 @@ def update_delivery_method_lists_for_checkout_info(
     shipping_method: Optional["ShippingMethod"],
     collection_point: Optional["Warehouse"],
     shipping_address: Optional["Address"],
-    lines: Iterable[CheckoutLineInfo],
+    lines: list[CheckoutLineInfo],
     shipping_channel_listings: Iterable[ShippingMethodChannelListing],
     database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
 ):
@@ -629,7 +718,8 @@ def update_delivery_method_lists_for_checkout_info(
     # Clear cached properties if they were already calculated, so they can be
     # recalculated.
     try:
-        del checkout_info.all_shipping_methods
+        del checkout_info._cached_built_in_shipping_methods
+        del checkout_info._cached_external_shipping_methods
     except AttributeError:
         pass
 
@@ -640,7 +730,7 @@ def update_delivery_method_lists_for_checkout_info(
 
 
 def find_checkout_line_info(
-    lines: Iterable["CheckoutLineInfo"],
+    lines: list["CheckoutLineInfo"],
     line_id: "UUID",
 ) -> "CheckoutLineInfo":
     """Return checkout line info from lines parameter.

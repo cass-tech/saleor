@@ -4,7 +4,7 @@ from ....attribute import models as models
 from ....permission.enums import ProductTypePermissions
 from ....webhook.event_types import WebhookEventAsyncType
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_310
+from ...core.context import ChannelContext
 from ...core.mutations import ModelDeleteMutation, ModelWithExtRefMutation
 from ...core.types import AttributeError
 from ...core.utils import WebhookEventInfo
@@ -17,7 +17,7 @@ class AttributeDelete(ModelDeleteMutation, ModelWithExtRefMutation):
         id = graphene.ID(required=False, description="ID of an attribute to delete.")
         external_reference = graphene.String(
             required=False,
-            description=f"External ID of an attribute to delete. {ADDED_IN_310}",
+            description="External ID of an attribute to delete.",
         )
 
     class Meta:
@@ -33,6 +33,12 @@ class AttributeDelete(ModelDeleteMutation, ModelWithExtRefMutation):
                 description="An attribute was deleted.",
             ),
         ]
+
+    @classmethod
+    def success_response(cls, instance):
+        response = super().success_response(instance)
+        response.attribute = ChannelContext(instance, None)
+        return response
 
     @classmethod
     def post_save_action(cls, info: ResolveInfo, instance, cleaned_input):

@@ -1,7 +1,6 @@
 from decimal import Decimal
 from unittest.mock import patch
 
-import before_after
 import graphene
 import pytest
 from django.utils import timezone
@@ -15,6 +14,7 @@ from .....payment.error_codes import PaymentErrorCode
 from .....payment.interface import StorePaymentMethodEnum
 from .....payment.models import ChargeStatus, Payment
 from .....plugins.manager import get_plugins_manager
+from .....tests import race_condition
 from ....core.utils import to_global_id_or_none
 from ....tests.utils import get_graphql_content
 
@@ -170,7 +170,7 @@ def test_checkout_add_payment(
     # given
     checkout = checkout_without_shipping_required
     checkout.billing_address = address
-    checkout.email = "old@example"
+    checkout.email = customer_user.email
     checkout.user = customer_user
     checkout.save()
 
@@ -321,7 +321,7 @@ def test_checkout_add_payment_no_checkout_email(
 
 
 @patch(
-    "saleor.payment.gateways.dummy.plugin.DummyGatewayPlugin.CONFIGURATION_PER_CHANNEL",
+    "saleor.payment.gateways.dummy.plugin.DeprecatedDummyGatewayPlugin.CONFIGURATION_PER_CHANNEL",
     False,
 )
 def test_checkout_add_payment_not_supported_currency(
@@ -371,7 +371,10 @@ def test_checkout_add_payment_not_existing_gateway(
     assert data["errors"][0]["field"] == "gateway"
 
 
-@patch("saleor.payment.gateways.dummy.plugin.DummyGatewayPlugin.DEFAULT_ACTIVE", False)
+@patch(
+    "saleor.payment.gateways.dummy.plugin.DeprecatedDummyGatewayPlugin.DEFAULT_ACTIVE",
+    False,
+)
 def test_checkout_add_payment_gateway_inactive(
     user_api_client, checkout_without_shipping_required, address
 ):
@@ -763,7 +766,7 @@ def test_checkout_add_payment_run_multiple_times(
         user_api_client.post_graphql(CREATE_PAYMENT_MUTATION, variables)
 
     # when
-    with before_after.before(
+    with race_condition.RunBefore(
         "saleor.graphql.payment.mutations.payment."
         "checkout_payment_create.cancel_active_payments",
         call_payment_create_mutation,

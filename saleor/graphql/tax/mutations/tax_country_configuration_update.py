@@ -1,5 +1,3 @@
-from typing import Optional
-
 import graphene
 from django.core.exceptions import ValidationError
 from django.db.models import Q
@@ -10,7 +8,6 @@ from ....permission.enums import CheckoutPermissions
 from ....tax import error_codes, models
 from ...account.enums import CountryCodeEnum
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_39
 from ...core.doc_category import DOC_CATEGORY_TAXES
 from ...core.mutations import BaseMutation
 from ...core.types import BaseInputObjectType, Error, NonNullList
@@ -69,7 +66,7 @@ class TaxCountryConfigurationUpdate(BaseMutation):
         )
 
     class Meta:
-        description = "Update tax class rates for a specific country." + ADDED_IN_39
+        description = "Update tax class rates for a specific country."
         doc_category = DOC_CATEGORY_TAXES
         error_type_class = TaxCountryConfigurationUpdateError
         permissions = (CheckoutPermissions.MANAGE_TAXES,)
@@ -104,7 +101,7 @@ class TaxCountryConfigurationUpdate(BaseMutation):
         failed_ids = []
         for item in tax_rate_items:
             global_id = item.get("tax_class_id")
-            pk: Optional[int] = None
+            pk: int | None = None
             if global_id:
                 try:
                     _, node_id = from_global_id_or_error(

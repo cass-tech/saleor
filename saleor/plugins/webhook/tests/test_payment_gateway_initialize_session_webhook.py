@@ -73,16 +73,16 @@ def _assert_with_static_payload(
 
 def _assert_fields(payload, webhook, expected_data, response, mock_request):
     webhook_app = webhook.app
-    event_payload = EventPayload.objects.get()
-    assert json.loads(event_payload.payload) == payload
-    delivery = EventDelivery.objects.get()
+    mock_request.assert_called_once()
+    delivery = mock_request.mock_calls[0].args[0]
+    event_payload = delivery.payload
+    assert json.loads(event_payload.get_payload()) == payload
     assert delivery.status == EventDeliveryStatus.PENDING
     assert (
         delivery.event_type == WebhookEventSyncType.PAYMENT_GATEWAY_INITIALIZE_SESSION
     )
     assert delivery.payload == event_payload
     assert delivery.webhook == webhook
-    mock_request.assert_called_once_with(delivery)
     assert response == [
         PaymentGatewayData(app_identifier=webhook_app.identifier, data=expected_data)
     ]
@@ -95,7 +95,9 @@ def test_gateway_initialize_checkout_without_request_data_and_static_payload(
 ):
     # given
     expected_data = {"some": "json data"}
-    mock_request.return_value = expected_data
+    mock_request.return_value = {
+        "data": expected_data,
+    }
     plugin = webhook_plugin()
 
     webhook_app.identifier = "app.identifier"
@@ -130,7 +132,9 @@ def test_gateway_initialize_checkout_with_request_data_and_static_payload(
     # given
     data = {"some": "request-data"}
     expected_data = {"some": "json data"}
-    mock_request.return_value = expected_data
+    mock_request.return_value = {
+        "data": expected_data,
+    }
     plugin = webhook_plugin()
 
     webhook_app.identifier = "app.identifier"
@@ -167,7 +171,9 @@ def test_gateway_initialize_checkout_without_request_data(
 ):
     # given
     expected_data = {"some": "json data"}
-    mock_request.return_value = expected_data
+    mock_request.return_value = {
+        "data": expected_data,
+    }
     plugin = webhook_plugin()
 
     webhook_app.identifier = "app.identifier"
@@ -204,7 +210,9 @@ def test_gateway_initialize_checkout_with_request_data(
     # given
     data = {"some": "request-data"}
     expected_data = {"some": "json data"}
-    mock_request.return_value = expected_data
+    mock_request.return_value = {
+        "data": expected_data,
+    }
     plugin = webhook_plugin()
 
     webhook_app.identifier = "app.identifier"
@@ -274,7 +282,9 @@ def test_gateway_initialize_order_without_request_data_static_payload(
 ):
     # given
     expected_data = {"some": "json data"}
-    mock_request.return_value = expected_data
+    mock_request.return_value = {
+        "data": expected_data,
+    }
     plugin = webhook_plugin()
 
     webhook_app.identifier = "app.identifier"
@@ -309,7 +319,9 @@ def test_gateway_initialize_order_with_request_data_static_payload(
     # given
     data = {"some": "request-data"}
     expected_data = {"some": "json data"}
-    mock_request.return_value = expected_data
+    mock_request.return_value = {
+        "data": expected_data,
+    }
     plugin = webhook_plugin()
 
     webhook_app.identifier = "app.identifier"
@@ -346,7 +358,9 @@ def test_gateway_initialize_session_for_order_without_request_data(
 ):
     # given
     expected_data = {"some": "json data"}
-    mock_request.return_value = expected_data
+    mock_request.return_value = {
+        "data": expected_data,
+    }
     plugin = webhook_plugin()
 
     webhook_app.identifier = "app.identifier"
@@ -384,7 +398,9 @@ def test_gateway_initialize_session_for_order_with_request_data(
     # given
     data = {"some": "request-data"}
     expected_data = {"some": "json data"}
-    mock_request.return_value = expected_data
+    mock_request.return_value = {
+        "data": expected_data,
+    }
     plugin = webhook_plugin()
 
     webhook_app.identifier = "app.identifier"

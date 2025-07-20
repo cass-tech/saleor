@@ -1,5 +1,6 @@
 from collections import defaultdict
-from typing import cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import graphene
 from django.core.exceptions import ValidationError
@@ -10,13 +11,12 @@ from .....core.tracing import traced_atomic_transaction
 from .....discount import DiscountValueType
 from .....discount.error_codes import DiscountErrorCode
 from .....discount.models import Promotion, PromotionRule
-from .....discount.utils import mark_catalogue_promotion_rules_as_dirty
+from .....discount.utils.promotion import mark_catalogue_promotion_rules_as_dirty
 from .....permission.enums import DiscountPermissions
 from .....product.utils.product import mark_products_in_channels_as_dirty
-from ....channel import ChannelContext
 from ....channel.mutations import BaseChannelListingMutation
 from ....core import ResolveInfo
-from ....core.descriptions import DEPRECATED_IN_3X_MUTATION
+from ....core.context import ChannelContext
 from ....core.doc_category import DOC_CATEGORY_DISCOUNTS
 from ....core.scalars import PositiveDecimal
 from ....core.types import BaseInputObjectType, DiscountError, NonNullList
@@ -67,11 +67,7 @@ class SaleChannelListingUpdate(BaseChannelListingMutation):
         )
 
     class Meta:
-        description = (
-            "Manage sale's availability in channels."
-            + DEPRECATED_IN_3X_MUTATION
-            + " Use `promotionRuleCreate` or `promotionRuleUpdate` mutations instead."
-        )
+        description = "Manage sale's availability in channels."
         doc_category = DOC_CATEGORY_DISCOUNTS
         permissions = (DiscountPermissions.MANAGE_DISCOUNTS,)
         error_type_class = DiscountError
@@ -112,7 +108,7 @@ class SaleChannelListingUpdate(BaseChannelListingMutation):
         old_listing_ids = PromotionRule.get_old_channel_listing_ids(
             len(rules_to_create)
         )
-        for idx, (channel, rule) in enumerate(rules_to_create):
+        for idx, (_channel, rule) in enumerate(rules_to_create):
             rule.old_channel_listing_id = old_listing_ids[idx][0]
 
         cls.save_promotion_rules(rules_to_create, rules_to_update)
@@ -224,6 +220,8 @@ class SaleChannelListingUpdate(BaseChannelListingMutation):
     ):
         add_channels = cleaned_input.get("add_channels", [])
         remove_channels = cleaned_input.get("remove_channels", [])
+        func_arg: Any
+        mark_as_dirty_func: Callable[[Any], None]
         if remove_channels and not add_channels:
             # In case of only removing the channels, we need to mark the product to be
             # recalculated.
@@ -231,8 +229,8 @@ class SaleChannelListingUpdate(BaseChannelListingMutation):
             mark_as_dirty_func = mark_products_in_channels_as_dirty
             func_arg = {int(channel_id): product_ids for channel_id in remove_channels}
         else:
-            mark_as_dirty_func = mark_catalogue_promotion_rules_as_dirty  # type: ignore
-            func_arg = [promotion.pk]  # type: ignore[assignment]
+            mark_as_dirty_func = mark_catalogue_promotion_rules_as_dirty
+            func_arg = [promotion.pk]
 
         with traced_atomic_transaction():
             cls.add_channels(promotion, rule, cleaned_input.get("add_channels", []))

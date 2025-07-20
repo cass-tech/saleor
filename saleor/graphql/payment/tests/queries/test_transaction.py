@@ -5,10 +5,14 @@ import pytest
 from django.utils import timezone
 from freezegun import freeze_time
 
-from .....payment import TransactionEventType
+from .....payment import PaymentMethodType, TransactionEventType
 from .....payment.models import TransactionEvent
 from ....core.utils import to_global_id_or_none
-from ....tests.utils import assert_no_permission, get_graphql_content
+from ....tests.utils import (
+    assert_no_permission,
+    get_graphql_content,
+    get_graphql_content_from_response,
+)
 
 TEST_SERVER_DOMAIN = "testserver.com"
 
@@ -86,6 +90,23 @@ TRANSACTION_QUERY = """
                 }
                 ... on App {
                     id
+                }
+            }
+            paymentMethodDetails{
+                __typename
+                ...on GenericPaymentMethodDetails{
+                    name
+                }
+                ...on CardPaymentMethodDetails{
+                    name
+                    brand
+                    firstDigits
+                    lastDigits
+                    expMonth
+                    expYear
+                }
+                ...on OtherPaymentMethodDetails{
+                    name
                 }
             }
         }
@@ -483,6 +504,28 @@ def test_transaction_create_by_user_query_no_permission(
     assert_no_permission(response)
 
 
+def test_query_transaction_by_invalid_id(staff_api_client, permission_manage_payments):
+    # given
+    id = graphene.Node.to_global_id("Order", "e6cad766-c9df-4970-b77b-b8eb0e303fb6")
+    variables = {"id": id}
+
+    # when
+    response = staff_api_client.post_graphql(
+        TRANSACTION_QUERY,
+        variables,
+        permissions=[permission_manage_payments],
+    )
+
+    # then
+    content = get_graphql_content_from_response(response)
+    assert len(content["errors"]) == 1
+    assert (
+        content["errors"][0]["message"]
+        == f"Invalid ID: {id}. Expected: TransactionItem, received: Order."
+    )
+    assert content["data"]["transaction"] is None
+
+
 @pytest.mark.parametrize(
     ("db_field", "api_field"),
     [
@@ -630,6 +673,7 @@ def test_transaction_event_by_app(
         external_url=f"http://`{TEST_SERVER_DOMAIN}/test",
         app_identifier=app_api_client.app.identifier,
         app=app_api_client.app,
+        include_in_calculations=True,
     )
 
     variables = {
@@ -767,3 +811,145 @@ def test_transaction_event_by_app_marked_to_remove(
     ]
     assert event_data["amount"]["currency"] == event.currency
     assert event_data["createdBy"]["id"] == to_global_id_or_none(webhook_app)
+
+
+def test_transaction_query_by_app_with_payment_method_card(
+    app_api_client, transaction_item_created_by_app, permission_manage_payments, app
+):
+    # given
+    expected_brand = "Visa"
+    expected_first_digits = "1234"
+    expected_last_digits = "5678"
+    expected_exp_month = 12
+    expected_exp_year = 2025
+
+    transaction_item_created_by_app.payment_method_type = PaymentMethodType.CARD
+    transaction_item_created_by_app.cc_brand = expected_brand
+    transaction_item_created_by_app.cc_first_digits = expected_first_digits
+    transaction_item_created_by_app.cc_last_digits = expected_last_digits
+    transaction_item_created_by_app.cc_exp_month = expected_exp_month
+    transaction_item_created_by_app.cc_exp_year = expected_exp_year
+    transaction_item_created_by_app.save()
+
+    variables = {
+        "id": graphene.Node.to_global_id(
+            "TransactionItem", transaction_item_created_by_app.token
+        )
+    }
+
+    # when
+    response = app_api_client.post_graphql(
+        TRANSACTION_QUERY, variables, permissions=[permission_manage_payments]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["transaction"]
+    assert data["paymentMethodDetails"]["__typename"] == "CardPaymentMethodDetails"
+    assert data["paymentMethodDetails"]["brand"] == expected_brand
+    assert data["paymentMethodDetails"]["firstDigits"] == expected_first_digits
+    assert data["paymentMethodDetails"]["lastDigits"] == expected_last_digits
+    assert data["paymentMethodDetails"]["expMonth"] == expected_exp_month
+    assert data["paymentMethodDetails"]["expYear"] == expected_exp_year
+
+
+def test_transaction_query_by_staff_with_payment_method_card(
+    staff_api_client, transaction_item_created_by_app, permission_manage_payments
+):
+    # given
+    expected_brand = "Visa"
+    expected_first_digits = "1234"
+    expected_last_digits = "5678"
+    expected_exp_month = 12
+    expected_exp_year = 2025
+
+    transaction_item_created_by_app.payment_method_type = PaymentMethodType.CARD
+    transaction_item_created_by_app.cc_brand = expected_brand
+    transaction_item_created_by_app.cc_first_digits = expected_first_digits
+    transaction_item_created_by_app.cc_last_digits = expected_last_digits
+    transaction_item_created_by_app.cc_exp_month = expected_exp_month
+    transaction_item_created_by_app.cc_exp_year = expected_exp_year
+    transaction_item_created_by_app.save()
+
+    variables = {
+        "id": graphene.Node.to_global_id(
+            "TransactionItem", transaction_item_created_by_app.token
+        )
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        TRANSACTION_QUERY, variables, permissions=[permission_manage_payments]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["transaction"]
+    assert data["paymentMethodDetails"]["__typename"] == "CardPaymentMethodDetails"
+    assert data["paymentMethodDetails"]["brand"] == expected_brand
+    assert data["paymentMethodDetails"]["firstDigits"] == expected_first_digits
+    assert data["paymentMethodDetails"]["lastDigits"] == expected_last_digits
+    assert data["paymentMethodDetails"]["expMonth"] == expected_exp_month
+    assert data["paymentMethodDetails"]["expYear"] == expected_exp_year
+
+
+def test_transaction_query_by_app_with_payment_method_other(
+    app_api_client, transaction_item_created_by_app, permission_manage_payments, app
+):
+    # given
+    expected_payment_method_name = "PayPal Express"
+
+    transaction_item_created_by_app.payment_method_type = PaymentMethodType.OTHER
+    transaction_item_created_by_app.payment_method_name = expected_payment_method_name
+    # Clear card-specific fields for OTHER payment method
+    transaction_item_created_by_app.cc_brand = None
+    transaction_item_created_by_app.cc_first_digits = None
+    transaction_item_created_by_app.cc_last_digits = None
+    transaction_item_created_by_app.cc_exp_month = None
+    transaction_item_created_by_app.cc_exp_year = None
+    transaction_item_created_by_app.save()
+
+    variables = {
+        "id": graphene.Node.to_global_id(
+            "TransactionItem", transaction_item_created_by_app.token
+        )
+    }
+
+    # when
+    response = app_api_client.post_graphql(
+        TRANSACTION_QUERY, variables, permissions=[permission_manage_payments]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["transaction"]
+    assert data["paymentMethodDetails"]["__typename"] == "OtherPaymentMethodDetails"
+    assert data["paymentMethodDetails"]["name"] == expected_payment_method_name
+
+
+def test_transaction_query_by_staff_with_payment_method_other(
+    staff_api_client, transaction_item_created_by_app, permission_manage_payments
+):
+    # given
+    expected_payment_method_name = "Apple Pay"
+
+    transaction_item_created_by_app.payment_method_type = PaymentMethodType.OTHER
+    transaction_item_created_by_app.payment_method_name = expected_payment_method_name
+    transaction_item_created_by_app.save()
+
+    variables = {
+        "id": graphene.Node.to_global_id(
+            "TransactionItem", transaction_item_created_by_app.token
+        )
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        TRANSACTION_QUERY, variables, permissions=[permission_manage_payments]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["transaction"]
+    assert data["paymentMethodDetails"]["__typename"] == "OtherPaymentMethodDetails"
+    assert data["paymentMethodDetails"]["name"] == expected_payment_method_name

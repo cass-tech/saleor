@@ -3,8 +3,8 @@ from unittest import mock
 import graphene
 import pytest
 
+from .....attribute.utils import associate_attribute_values_to_instance
 from .....page.models import Page
-from ....attribute.utils import associate_attribute_values_to_instance
 from ....tests.utils import assert_no_permission, get_graphql_content
 
 PAGE_TYPE_BULK_DELETE_MUTATION = """
@@ -55,7 +55,7 @@ def test_page_type_bulk_delete_by_staff(
     assert not Page.objects.filter(pk__in=pages_pks)
 
 
-@mock.patch("saleor.plugins.webhook.plugin.get_webhooks_for_event")
+@mock.patch("saleor.graphql.page.bulk_mutations.get_webhooks_for_event")
 @mock.patch("saleor.plugins.webhook.plugin.trigger_webhooks_async")
 def test_page_type_bulk_delete_trigger_webhooks(
     mocked_webhook_trigger,

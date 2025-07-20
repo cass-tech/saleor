@@ -1,5 +1,7 @@
 import graphene
+from django.core.exceptions import ValidationError
 
+from ....checkout.actions import call_checkout_info_event
 from ....checkout.error_codes import CheckoutErrorCode
 from ....checkout.fetch import (
     fetch_checkout_info,
@@ -7,12 +9,15 @@ from ....checkout.fetch import (
     update_delivery_method_lists_for_checkout_info,
 )
 from ....checkout.utils import add_variants_to_checkout, invalidate_checkout
+from ....core.utils import metadata_manager
 from ....warehouse.reservations import get_reservation_length, is_reservation_enabled
 from ....webhook.event_types import WebhookEventAsyncType
 from ...app.dataloaders import get_app_promise
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_34, DEPRECATED_IN_3X_INPUT
+from ...core.context import SyncWebhookControlContext
+from ...core.descriptions import DEPRECATED_IN_3X_INPUT
 from ...core.doc_category import DOC_CATEGORY_CHECKOUT
+from ...core.enums import MetadataErrorCode
 from ...core.mutations import BaseMutation
 from ...core.scalars import UUID
 from ...core.types import CheckoutError, NonNullList
@@ -41,7 +46,7 @@ class CheckoutLinesAdd(BaseMutation):
 
     class Arguments:
         id = graphene.ID(
-            description="The checkout's ID." + ADDED_IN_34,
+            description="The checkout's ID.",
             required=False,
         )
         token = UUID(
@@ -105,49 +110,16 @@ class CheckoutLinesAdd(BaseMutation):
         )
 
     @classmethod
-    def clean_input(
+    def process_lines_input(
         cls,
         info,
         checkout,
         variants,
         checkout_lines_data,
         checkout_info,
-        lines,
-        manager,
-        replace,
+        replace=False,
+        raise_error_for_missing_lines=False,
     ):
-        channel_slug = checkout_info.channel.slug
-
-        cls.validate_checkout_lines(
-            info,
-            variants,
-            checkout_lines_data,
-            checkout.get_country(),
-            channel_slug,
-            checkout_info.delivery_method_info,
-            lines=lines,
-        )
-
-        variants_ids_to_validate = {
-            variant.id
-            for variant, line_data in zip(variants, checkout_lines_data)
-            if line_data.quantity_to_update and line_data.quantity != 0
-        }
-
-        # validate variant only when line quantity is bigger than 0
-        if variants_ids_to_validate:
-            validate_variants_available_for_purchase(
-                variants_ids_to_validate, checkout.channel_id
-            )
-            validate_variants_available_in_channel(
-                variants_ids_to_validate,
-                checkout.channel_id,
-                CheckoutErrorCode.UNAVAILABLE_VARIANT_IN_CHANNEL.value,
-            )
-            validate_variants_are_published(
-                variants_ids_to_validate, checkout.channel_id
-            )
-
         if variants and checkout_lines_data:
             site = get_site_promise(info.context).get()
             checkout = add_variants_to_checkout(
@@ -160,6 +132,7 @@ class CheckoutLinesAdd(BaseMutation):
                 reservation_length=get_reservation_length(
                     site=site, user=info.context.user
                 ),
+                raise_error_for_missing_lines=raise_error_for_missing_lines,
             )
 
         lines, _ = fetch_checkout_lines(checkout)
@@ -175,6 +148,62 @@ class CheckoutLinesAdd(BaseMutation):
         return lines
 
     @classmethod
+    def clean_input(
+        cls,
+        info,
+        checkout,
+        variants,
+        checkout_lines_data,
+        checkout_info,
+        lines,
+    ):
+        channel_slug = checkout_info.channel.slug
+
+        cls.validate_checkout_lines(
+            info,
+            variants,
+            checkout_lines_data,
+            checkout.get_country(),
+            channel_slug,
+            checkout_info.get_delivery_method_info(),
+            lines=lines,
+        )
+
+        variants_ids_to_validate = {
+            variant.id
+            for variant, line_data in zip(variants, checkout_lines_data, strict=False)
+            if line_data.quantity_to_update and line_data.quantity != 0
+        }
+        # validate variant only when line quantity is bigger than 0
+        if variants_ids_to_validate:
+            validate_variants_available_for_purchase(
+                variants_ids_to_validate, checkout.channel_id
+            )
+            validate_variants_available_in_channel(
+                variants_ids_to_validate,
+                checkout.channel_id,
+                CheckoutErrorCode.UNAVAILABLE_VARIANT_IN_CHANNEL.value,
+            )
+            validate_variants_are_published(
+                variants_ids_to_validate, checkout.channel_id
+            )
+
+    @classmethod
+    def _validate_lines_metadata(cls, lines: list[CheckoutLineInput]):
+        try:
+            for line in lines:
+                metadata_manager.create_from_graphql_input(line.metadata)
+        except metadata_manager.MetadataEmptyKeyError:
+            raise ValidationError(
+                {
+                    "metadata": ValidationError(
+                        "Metadata key cannot be empty.",
+                        code=MetadataErrorCode.REQUIRED.value,
+                    )
+                }
+            ) from None
+
+    @classmethod
     def perform_mutation(  # type: ignore[override]
         cls,
         _root,
@@ -185,10 +214,14 @@ class CheckoutLinesAdd(BaseMutation):
         checkout_id=None,
         token=None,
         id=None,
-        replace=False,
     ):
         app = get_app_promise(info.context).get()
         check_permissions_for_custom_prices(app, lines)
+
+        # Validate lines early, before clean input. This class pass to clean_input already modified payload
+        # Hence common logic for validation pure input doesn't work.
+        # At this point lines are raw so validation like checking metadata can be performed early
+        cls._validate_lines_metadata(lines)
 
         checkout = get_checkout(cls, info, checkout_id=checkout_id, token=token, id=id)
         manager = get_plugin_manager_promise(info.context).get()
@@ -201,23 +234,38 @@ class CheckoutLinesAdd(BaseMutation):
             checkout, skip_lines_with_unavailable_variants=False
         )
         input_lines_data = cls._get_grouped_lines_data(lines, existing_lines_info)
-        lines = cls.clean_input(
+        cls.clean_input(
             info,
             checkout,
             variants,
             input_lines_data,
             checkout_info,
             existing_lines_info,
-            manager,
-            replace,
+        )
+        lines = cls.process_lines_input(
+            info,
+            checkout,
+            variants,
+            input_lines_data,
+            checkout_info,
         )
 
         update_checkout_external_shipping_method_if_invalid(checkout_info, lines)
-        update_checkout_shipping_method_if_invalid(checkout_info, lines)
-        invalidate_checkout(checkout_info, lines, manager, save=True)
-        cls.call_event(manager.checkout_updated, checkout)
+        shipping_update_fields = update_checkout_shipping_method_if_invalid(
+            checkout_info, lines
+        )
+        invalidate_update_fields = invalidate_checkout(
+            checkout_info, lines, manager, save=False
+        )
+        checkout.save(update_fields=shipping_update_fields + invalidate_update_fields)
+        call_checkout_info_event(
+            manager,
+            event_name=WebhookEventAsyncType.CHECKOUT_UPDATED,
+            checkout_info=checkout_info,
+            lines=lines,
+        )
 
-        return CheckoutLinesAdd(checkout=checkout)
+        return CheckoutLinesAdd(checkout=SyncWebhookControlContext(node=checkout))
 
     @classmethod
     def _get_variants_from_lines_input(cls, lines: list[dict]) -> list[ProductVariant]:

@@ -1,7 +1,7 @@
 from itertools import chain
-from typing import Optional
 
 from django.db.models import Q
+from graphql import GraphQLError
 from i18naddress import get_validation_rules
 
 from ...account import models
@@ -67,7 +67,7 @@ def resolve_user(info, id=None, email=None, external_reference=None):
         if id:
             _model, filter_kwargs["pk"] = from_global_id_or_error(id, User)
         if email:
-            filter_kwargs["email"] = email
+            filter_kwargs["email__iexact"] = email.lower()
         if external_reference:
             filter_kwargs["external_reference"] = external_reference
         if requester.has_perms(
@@ -130,7 +130,7 @@ def resolve_users(info, ids=None, emails=None):
 
     if ids and emails:
         return qs.filter(Q(id__in=ids) | Q(email__in=emails))
-    elif ids:
+    if ids:
         return qs.filter(id__in=ids)
     return qs.filter(email__in=emails)
 
@@ -139,9 +139,9 @@ def resolve_users(info, ids=None, emails=None):
 def resolve_address_validation_rules(
     info: ResolveInfo,
     country_code: str,
-    country_area: Optional[str],
-    city: Optional[str],
-    city_area: Optional[str],
+    country_area: str | None,
+    city: str | None,
+    city_area: str | None,
 ):
     params = {
         "country_code": country_code,
@@ -149,6 +149,10 @@ def resolve_address_validation_rules(
         "city": city,
         "city_area": city_area,
     }
+    # EU is available as a country code in CountryCode enum but it's not valid for
+    # the address validation
+    if country_code.upper() == "EU":
+        raise GraphQLError("Cannot validate address for EU country code.")
     rules = get_validation_rules(params)
     return AddressValidationData(
         country_code=rules.country_code,
@@ -179,7 +183,7 @@ def resolve_address_validation_rules(
 
 @traced_resolver
 def resolve_payment_sources(
-    _info, user: models.User, manager, channel_slug: Optional[str]
+    _info, user: models.User, manager, channel_slug: str | None
 ):
     stored_customer_accounts = [
         (gtw.id, fetch_customer_id(user, gtw.id))

@@ -1,4 +1,4 @@
-from typing import Optional, cast
+from typing import cast
 
 import graphene
 from django.core.exceptions import ValidationError
@@ -11,6 +11,7 @@ from ....order.error_codes import OrderErrorCode
 from ....permission.enums import OrderPermissions
 from ...app.dataloaders import get_app_promise
 from ...core import ResolveInfo
+from ...core.context import SyncWebhookControlContext
 from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.mutations import BaseMutation
 from ...core.types import BaseInputObjectType, OrderError
@@ -101,7 +102,7 @@ class FulfillmentCancel(BaseMutation):
         if fulfillment.status == FulfillmentStatus.WAITING_FOR_APPROVAL:
             warehouse = None
         elif input:
-            warehouse_id: Optional[str] = input.get("warehouse_id")
+            warehouse_id: str | None = input.get("warehouse_id")
             if warehouse_id:
                 warehouse = cls.get_node_or_error(
                     info, warehouse_id, only_type=Warehouse, field="warehouse_id"
@@ -112,8 +113,12 @@ class FulfillmentCancel(BaseMutation):
         app = get_app_promise(info.context).get()
         manager = get_plugin_manager_promise(info.context).get()
         if fulfillment.status == FulfillmentStatus.WAITING_FOR_APPROVAL:
-            fulfillment = cancel_waiting_fulfillment(fulfillment, user, app, manager)
+            cancel_waiting_fulfillment(fulfillment, user, app, manager)
+            fulfillment_response = None
         else:
             fulfillment = cancel_fulfillment(fulfillment, user, app, warehouse, manager)
+            fulfillment_response = SyncWebhookControlContext(node=fulfillment)
         order.refresh_from_db(fields=["status"])
-        return FulfillmentCancel(fulfillment=fulfillment, order=order)
+        return FulfillmentCancel(
+            fulfillment=fulfillment_response, order=SyncWebhookControlContext(order)
+        )

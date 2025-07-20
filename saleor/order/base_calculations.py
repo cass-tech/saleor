@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 from prices import Money, TaxedMoney
@@ -7,9 +7,10 @@ from prices import Money, TaxedMoney
 from ..core.db.connection import allow_writer
 from ..core.prices import quantize_price
 from ..core.taxes import zero_money
-from ..discount import DiscountType, DiscountValueType, VoucherType
+from ..discount import DiscountType, DiscountValueType
 from ..discount.models import OrderDiscount
-from ..discount.utils import apply_discount_to_value
+from ..discount.utils.manual_discount import apply_discount_to_value
+from ..discount.utils.voucher import is_order_level_voucher, is_shipping_voucher
 from ..shipping.models import ShippingMethodChannelListing
 from .interface import OrderTaxedPricesData
 
@@ -36,6 +37,7 @@ def base_order_subtotal(order: "Order", lines: Iterable["OrderLine"]) -> Money:
         quantity = line.quantity
         base_line_total = line.base_unit_price * quantity
         subtotal += base_line_total
+
     return quantize_price(subtotal, currency)
 
 
@@ -48,7 +50,7 @@ def base_order_total(
 
     All discounts are included in this price.
     """
-    subtotal, shipping_price = apply_order_discounts(
+    subtotal, shipping_price = calculate_prices(
         order,
         lines,
         assign_prices=False,
@@ -92,9 +94,8 @@ def propagate_order_discount_on_order_prices(
     discount.
     """
     base_subtotal = base_order_subtotal(order, lines)
-    base_shipping_price = order.base_shipping_price
     subtotal = base_subtotal
-    shipping_price = base_shipping_price
+    shipping_price = order.base_shipping_price
     currency = order.currency
     order_discounts_to_update = []
 
@@ -103,13 +104,19 @@ def propagate_order_discount_on_order_prices(
         shipping_price_before_discount = shipping_price
         if order_discount.type == DiscountType.VOUCHER:
             voucher = order_discount.voucher
-            if voucher and voucher.type == VoucherType.ENTIRE_ORDER:
+            if is_order_level_voucher(voucher):
                 subtotal = apply_discount_to_value(
                     value=order_discount.value,
                     value_type=order_discount.value_type,
                     currency=currency,
                     price_to_discount=subtotal,
                 )
+            # Shipping voucher is tricky: it is associated with an order, but it
+            # decreases base price, similar to line level discounts, so we should
+            # exclude it
+            if is_shipping_voucher(order_discount.voucher):
+                continue
+
         elif order_discount.type == DiscountType.ORDER_PROMOTION:
             subtotal = apply_discount_to_value(
                 value=order_discount.value,
@@ -161,7 +168,7 @@ def propagate_order_discount_on_order_prices(
     return subtotal, shipping_price
 
 
-def apply_order_discounts(
+def calculate_prices(
     order: "Order",
     lines: Iterable["OrderLine"],
     assign_prices=True,
@@ -169,7 +176,7 @@ def apply_order_discounts(
 ) -> tuple[Money, Money]:
     """Calculate prices after applying order level discounts.
 
-    Handles manual discounts and ENTIRE_ORDER vouchers.
+    Handles manual discounts, ENTIRE_ORDER vouchers and ORDER_PROMOTION.
     Shipping vouchers are included in the base shipping price.
     Specific product vouchers are included in line base prices.
     Entire order vouchers are recalculated and updated in this function
@@ -238,7 +245,10 @@ def propagate_order_discount_on_order_lines_prices(
                 share = (
                     line.base_unit_price_amount * line.quantity / base_subtotal.amount
                 )
-                discount = min(share * subtotal_discount, base_subtotal)
+                discount = quantize_price(
+                    min(share * subtotal_discount, base_subtotal),
+                    base_subtotal.currency,
+                )
                 yield (
                     line,
                     _get_total_price_with_subtotal_discount_for_order_line(
@@ -260,7 +270,7 @@ def get_total_price_with_subtotal_discount_for_order_line(
     lines: Iterable["OrderLine"],
     base_subtotal: Money,
     subtotal_discount: Money,
-) -> Optional[Money]:
+) -> Money | None:
     for order_line, total_price in propagate_order_discount_on_order_lines_prices(
         lines, base_subtotal, subtotal_discount
     ):
@@ -283,8 +293,7 @@ def apply_subtotal_discount_to_order_lines(
 
 
 def assign_order_line_prices(line: "OrderLine", total_price: Money):
-    currency = total_price.currency
-    line.total_price_net = quantize_price(total_price, currency)
+    line.total_price_net = total_price
     line.total_price_gross = line.total_price_net
     line.undiscounted_total_price_gross_amount = (
         line.undiscounted_total_price_net_amount
@@ -296,7 +305,7 @@ def assign_order_line_prices(line: "OrderLine", total_price: Money):
         line.unit_price_net = unit_price
         line.unit_price_gross = unit_price
 
-        undiscounted_unit_price = line.undiscounted_total_price_net_amount / quantity
+        undiscounted_unit_price = line.undiscounted_base_unit_price_amount
         line.undiscounted_unit_price_net_amount = undiscounted_unit_price
         line.undiscounted_unit_price_gross_amount = undiscounted_unit_price
 
@@ -308,6 +317,7 @@ def assign_order_prices(
     shipping_price: Money,
     database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
 ):
+    shipping_price = quantize_price(shipping_price, order.currency)
     order.shipping_price_net_amount = shipping_price.amount
     order.shipping_price_gross_amount = shipping_price.amount
     order.total_net_amount = subtotal.amount + shipping_price.amount

@@ -1,5 +1,4 @@
 from collections import defaultdict
-from typing import Union
 
 import graphene
 from django.core.exceptions import ValidationError
@@ -13,11 +12,12 @@ from ....core.tracing import traced_atomic_transaction
 from ....core.utils import prepare_unique_slug
 from ....permission.enums import PageTypePermissions, ProductTypePermissions
 from ....webhook.event_types import WebhookEventAsyncType
+from ....webhook.utils import get_webhooks_for_event
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_315, PREVIEW_FEATURE
+from ...core.context import ChannelContext
 from ...core.doc_category import DOC_CATEGORY_ATTRIBUTES
 from ...core.enums import ErrorPolicyEnum
-from ...core.mutations import BaseMutation, ModelMutation
+from ...core.mutations import BaseMutation, DeprecatedModelMutation
 from ...core.types import AttributeBulkCreateError, BaseObjectType, NonNullList
 from ...core.utils import WebhookEventInfo, get_duplicated_values
 from ...plugins.dataloaders import get_plugin_manager_promise
@@ -57,11 +57,10 @@ def validate_value(
         )
 
     if not is_swatch_attr and any(
-        [value_data.get(field) for field in ONLY_SWATCH_FIELDS]
+        value_data.get(field) for field in ONLY_SWATCH_FIELDS
     ):
         message = (
-            "Cannot define value, file and contentType fields for not "
-            "swatch attribute."
+            "Cannot define value, file and contentType fields for not swatch attribute."
         )
         index_error_map[attribute_index].append(
             error_class(
@@ -96,7 +95,11 @@ def clean_values(
         slugs_list = list(attribute.values.values_list("slug", flat=True))
 
     duplicated_names = get_duplicated_values(
-        [unidecode(value_data.name.lower().strip()) for value_data in values]
+        [
+            unidecode(value_data.name.lower().strip())
+            for value_data in values
+            if value_data.name
+        ]
     )
 
     for value_index, value_data in enumerate(values):
@@ -117,6 +120,16 @@ def clean_values(
                     path=f"{path_prefix}.{value_index}.externalReference",
                     message="External reference already exists.",
                     code=error_class.code.UNIQUE.value,
+                )
+            )
+            continue
+
+        if not value_data.name:
+            index_error_map[attribute_index].append(
+                error_class(
+                    path=f"{path_prefix}.{value_index}.name",
+                    message="The field is required.",
+                    code=error_class.code.REQUIRED.value,
                 )
             )
             continue
@@ -185,13 +198,21 @@ class AttributeBulkCreateResult(BaseObjectType):
 def get_results(
     instances_data_with_errors_list: list[dict], reject_everything: bool = False
 ) -> list[AttributeBulkCreateResult]:
-    return [
-        AttributeBulkCreateResult(
-            attribute=None if reject_everything else data.get("instance"),
-            errors=data.get("errors"),
+    results = []
+    for data in instances_data_with_errors_list:
+        if reject_everything:
+            attribute = None
+        else:
+            attribute = data.get("instance")
+            if attribute:
+                attribute = ChannelContext(attribute, None)
+        results.append(
+            AttributeBulkCreateResult(
+                attribute=attribute,
+                errors=data.get("errors"),
+            )
         )
-        for data in instances_data_with_errors_list
-    ]
+    return results
 
 
 class AttributeBulkCreate(BaseMutation):
@@ -219,7 +240,7 @@ class AttributeBulkCreate(BaseMutation):
         )
 
     class Meta:
-        description = "Creates attributes." + ADDED_IN_315 + PREVIEW_FEATURE
+        description = "Creates attributes."
         doc_category = DOC_CATEGORY_ATTRIBUTES
         error_type_class = AttributeBulkCreateError
         webhook_events_info = [
@@ -338,12 +359,12 @@ class AttributeBulkCreate(BaseMutation):
         index_error_map: dict[int, list[AttributeBulkCreateError]],
     ):
         values = attribute_data.pop("values", None)
-        cleaned_input = ModelMutation.clean_input(
+        cleaned_input = DeprecatedModelMutation.clean_input(
             info, None, attribute_data, input_cls=AttributeCreateInput
         )
 
         # check permissions based on attribute type
-        permissions: Union[tuple[ProductTypePermissions], tuple[PageTypePermissions]]
+        permissions: tuple[ProductTypePermissions] | tuple[PageTypePermissions]
         if cleaned_input["type"] == AttributeTypeEnum.PRODUCT_TYPE.value:
             permissions = (ProductTypePermissions.MANAGE_PRODUCT_TYPES_AND_ATTRIBUTES,)
         else:
@@ -529,8 +550,9 @@ class AttributeBulkCreate(BaseMutation):
     @classmethod
     def post_save_actions(cls, info: ResolveInfo, attributes: list[models.Attribute]):
         manager = get_plugin_manager_promise(info.context).get()
+        webhooks = get_webhooks_for_event(WebhookEventAsyncType.ATTRIBUTE_CREATED)
         for attribute in attributes:
-            cls.call_event(manager.attribute_created, attribute)
+            cls.call_event(manager.attribute_created, attribute, webhooks=webhooks)
 
     @classmethod
     @traced_atomic_transaction()

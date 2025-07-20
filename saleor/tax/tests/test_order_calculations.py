@@ -1,15 +1,17 @@
 from decimal import Decimal
 
+import pytest
 from prices import Money, TaxedMoney
 
-from saleor.tax.models import TaxClassCountryRate
+from saleor.tax.models import TaxClass, TaxClassCountryRate
 
 from ...core.prices import quantize_price
 from ...core.taxes import zero_money, zero_taxed_money
 from ...discount import DiscountType, DiscountValueType
 from ...order import OrderStatus
-from ...order.base_calculations import apply_order_discounts
+from ...order.base_calculations import calculate_prices
 from ...order.calculations import fetch_order_prices_if_expired
+from ...order.models import OrderLine
 from ...order.utils import get_order_country
 from ...payment.model_helpers import get_subtotal
 from ...plugins.manager import get_plugins_manager
@@ -20,19 +22,25 @@ from ..calculations.order import (
 )
 
 
-def _enable_flat_rates(order, prices_entered_with_tax):
+def _enable_flat_rates(
+    order, prices_entered_with_tax, use_weighted_tax_for_shipping=False
+):
     tc = order.channel.tax_configuration
     tc.country_exceptions.all().delete()
     tc.prices_entered_with_tax = prices_entered_with_tax
     tc.tax_calculation_strategy = TaxCalculationStrategy.FLAT_RATES
+    tc.use_weighted_tax_for_shipping = use_weighted_tax_for_shipping
     tc.save()
 
 
-def test_calculations_calculate_order_total(order_with_lines):
+@pytest.mark.parametrize("use_weighted_tax_for_shipping", [True, False])
+def test_calculations_calculate_order_total(
+    order_with_lines_untaxed, use_weighted_tax_for_shipping
+):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
-    _enable_flat_rates(order, prices_entered_with_tax)
+    _enable_flat_rates(order, prices_entered_with_tax, use_weighted_tax_for_shipping)
     lines = order.lines.all()
 
     # when
@@ -44,13 +52,172 @@ def test_calculations_calculate_order_total(order_with_lines):
     )
 
 
-def test_calculations_calculate_order_undiscounted_total(
-    order_with_lines, voucher_shipping_type
+@pytest.mark.parametrize(
+    (
+        "expected_net",
+        "expected_gross",
+        "prices_entered_with_tax",
+        "use_weighted_tax_for_shipping",
+    ),
+    [
+        ("80.00", "90.40", False, False),
+        ("71.35", "80.00", True, False),
+        ("80.00", "89.26", False, True),
+        ("72.25", "80.00", True, True),
+    ],
+)
+def test_calculate_order_total_with_multiple_tax_rates(
+    order_with_lines_untaxed,
+    expected_net,
+    expected_gross,
+    prices_entered_with_tax,
+    use_weighted_tax_for_shipping,
+    tax_classes,
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
+    _enable_flat_rates(order, prices_entered_with_tax, use_weighted_tax_for_shipping)
+
+    country = get_order_country(order)
+
+    lines = list(order.lines.all())
+    first_line = lines[0]
+    second_line = lines[-1]
+
+    # Set different tax rates for different products
+    first_line.tax_class.country_rates.update_or_create(country=country, rate=23)
+
+    second_tax_class = tax_classes[0]
+    second_tax_class.country_rates.filter(country=country).update(rate=3)
+    second_line.tax_class = second_tax_class
+    second_line.save()
+
+    # when
+    update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
+
+    # then
+    assert order.total == TaxedMoney(
+        net=Money(expected_net, "USD"), gross=Money(expected_gross, "USD")
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "expected_net",
+        "expected_gross",
+        "prices_entered_with_tax",
+    ),
+    [
+        ("10.00", "12.30", False),
+        ("8.13", "10.00", True),
+    ],
+)
+def test_calculate_order_shipping_with_not_weighted_taxes(
+    order_with_lines_untaxed,
+    shipping_zone,
+    expected_net,
+    expected_gross,
+    prices_entered_with_tax,
+    tax_classes,
+):
+    # given
+    order = order_with_lines_untaxed
+    _enable_flat_rates(
+        order, prices_entered_with_tax, use_weighted_tax_for_shipping=False
+    )
+
+    country = get_order_country(order)
+
+    lines = list(order.lines.all())
+    first_line = lines[0]
+    second_line = lines[-1]
+
+    # Set different tax rates for different products
+    first_line.tax_class.country_rates.update_or_create(country=country, rate=23)
+
+    second_tax_class = tax_classes[0]
+    second_tax_class.country_rates.filter(country=country).update(rate=3)
+    second_line.tax_class = second_tax_class
+    second_line.save()
+
+    # when
+    update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
+
+    # then
+    assert order.shipping_tax_rate == Decimal("0.2300")
+    assert order.shipping_price == TaxedMoney(
+        net=Money(expected_net, "USD"), gross=Money(expected_gross, "USD")
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "expected_net",
+        "expected_gross",
+        "prices_entered_with_tax",
+        "expected_shipping_tax_rate",
+    ),
+    [
+        ("10.00", "11.16", False, "0.1157"),
+        ("9.03", "10.00", True, "0.1072"),
+    ],
+)
+def test_calculate_order_shipping_with_weighted_taxes(
+    order_with_lines_untaxed,
+    expected_net,
+    expected_gross,
+    prices_entered_with_tax,
+    tax_classes,
+    expected_shipping_tax_rate,
+):
+    # given
+    order = order_with_lines_untaxed
+    _enable_flat_rates(
+        order, prices_entered_with_tax, use_weighted_tax_for_shipping=True
+    )
+
+    country = get_order_country(order)
+
+    lines = list(order.lines.all())
+    first_line = lines[0]
+    second_line = lines[-1]
+
+    # Set different tax rates for different products
+    first_line.tax_class.country_rates.update_or_create(country=country, rate=23)
+
+    second_tax_class = tax_classes[0]
+    second_tax_class.country_rates.filter(country=country).update(rate=3)
+    second_line.tax_class = second_tax_class
+    second_line.save()
+
+    # when
+    update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
+
+    # then
+    weighted_tax_amount = sum(
+        line.total_price.net.amount * line.tax_rate for line in lines
+    )
+    weighted_tax_amount = weighted_tax_amount / sum(
+        line.total_price.net.amount for line in lines
+    )
+    assert (
+        order.shipping_tax_rate.quantize(Decimal("0.0001"))
+        == Decimal(weighted_tax_amount).quantize(Decimal("0.0001"))
+        == Decimal(expected_shipping_tax_rate).quantize(Decimal("0.0001"))
+    )
+    assert order.shipping_price == TaxedMoney(
+        net=Money(expected_net, "USD"), gross=Money(expected_gross, "USD")
+    )
+
+
+@pytest.mark.parametrize("use_weighted_tax_for_shipping", [True, False])
+def test_calculations_calculate_order_undiscounted_total(
+    order_with_lines_untaxed, voucher_shipping_type, use_weighted_tax_for_shipping
+):
+    # given
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
-    _enable_flat_rates(order, prices_entered_with_tax)
+    _enable_flat_rates(order, prices_entered_with_tax, use_weighted_tax_for_shipping)
     lines = order.lines.all()
 
     order.discounts.create(
@@ -82,10 +249,10 @@ def test_calculations_calculate_order_undiscounted_total(
 
 
 def test_calculations_calculate_order_total_use_product_type_tax_class(
-    order_with_lines,
+    order_with_lines_untaxed,
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
@@ -105,9 +272,9 @@ def test_calculations_calculate_order_total_use_product_type_tax_class(
     )
 
 
-def test_calculations_calculate_order_total_no_rates(order_with_lines):
+def test_calculations_calculate_order_total_no_rates(order_with_lines_untaxed):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
@@ -123,9 +290,11 @@ def test_calculations_calculate_order_total_no_rates(order_with_lines):
     )
 
 
-def test_calculations_calculate_order_total_default_country_rate(order_with_lines):
+def test_calculations_calculate_order_total_default_country_rate(
+    order_with_lines_untaxed,
+):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     country = get_order_country(order)
     _enable_flat_rates(order, prices_entered_with_tax)
@@ -143,9 +312,9 @@ def test_calculations_calculate_order_total_default_country_rate(order_with_line
     )
 
 
-def test_calculations_calculate_order_total_voucher(order_with_lines, voucher):
+def test_calculations_calculate_order_total_voucher(order_with_lines_untaxed, voucher):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
@@ -161,7 +330,7 @@ def test_calculations_calculate_order_total_voucher(order_with_lines, voucher):
         amount_value=10,
         voucher=voucher,
     )
-    apply_order_discounts(order_with_lines, lines)
+    calculate_prices(order, lines)
 
     # when
     update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
@@ -172,9 +341,11 @@ def test_calculations_calculate_order_total_voucher(order_with_lines, voucher):
     )
 
 
-def test_calculations_calculate_order_total_with_manual_discount(order_with_lines):
+def test_calculations_calculate_order_total_with_manual_discount(
+    order_with_lines_untaxed,
+):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
@@ -188,7 +359,7 @@ def test_calculations_calculate_order_total_with_manual_discount(order_with_line
         currency=order.currency,
         amount_value=10,
     )
-    apply_order_discounts(order_with_lines, lines)
+    calculate_prices(order, lines)
 
     # when
     update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
@@ -200,10 +371,10 @@ def test_calculations_calculate_order_total_with_manual_discount(order_with_line
 
 
 def test_calculations_calculate_order_total_with_discount_for_order_total(
-    order_with_lines,
+    order_with_lines_untaxed,
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
@@ -226,10 +397,10 @@ def test_calculations_calculate_order_total_with_discount_for_order_total(
 
 
 def test_calculations_calculate_order_total_with_discount_for_subtotal_and_shipping(
-    order_with_lines,
+    order_with_lines_untaxed,
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
@@ -243,22 +414,22 @@ def test_calculations_calculate_order_total_with_discount_for_subtotal_and_shipp
         currency=order.currency,
         amount_value=75,
     )
-    apply_order_discounts(order_with_lines, lines)
+    calculate_prices(order, lines)
 
     # when
     update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
 
     # then
     assert order.total == TaxedMoney(
-        net=Money("4.06", "USD"), gross=Money("5.01", "USD")
+        net=Money("4.07", "USD"), gross=Money("5.01", "USD")
     )
 
 
 def test_calculations_calculate_order_total_with_discount_for_more_than_order_total(
-    order_with_lines,
+    order_with_lines_untaxed,
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
@@ -281,10 +452,10 @@ def test_calculations_calculate_order_total_with_discount_for_more_than_order_to
 
 
 def test_calculations_calculate_order_total_with_manual_discount_and_voucher(
-    order_with_lines, voucher
+    order_with_lines_untaxed, voucher
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
@@ -308,14 +479,14 @@ def test_calculations_calculate_order_total_with_manual_discount_and_voucher(
         amount_value=10,
         voucher=voucher,
     )
-    apply_order_discounts(order_with_lines, lines)
+    calculate_prices(order, lines)
 
     # when
     update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
 
     # then
     assert order.total == TaxedMoney(
-        net=Money("48.78", "USD"), gross=Money("60.00", "USD")
+        net=Money("48.77", "USD"), gross=Money("60.00", "USD")
     )
 
 
@@ -330,10 +501,13 @@ def test_calculate_order_shipping(order_line, shipping_zone):
     order.shipping_address = order.billing_address.get_copy()
     order.shipping_method_name = method.name
     order.shipping_method = method
-    order.base_shipping_price = method.channel_listings.get(channel=order.channel).price
+    order.shipping_tax_class = method.tax_class
+    base_shipping_price = method.channel_listings.get(channel=order.channel).price
+    order.base_shipping_price = base_shipping_price
+    order.undiscounted_base_shipping_price = base_shipping_price
     order.save()
 
-    apply_order_discounts(order, lines)
+    calculate_prices(order, lines)
 
     # when
     update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
@@ -371,32 +545,29 @@ def test_calculate_order_shipping_voucher_on_shipping(
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
     currency = order.currency
-    discount_amount = Decimal("5.0")
 
     method = shipping_zone.shipping_methods.get()
     order.shipping_address = order.billing_address.get_copy()
     order.shipping_method_name = method.name
     order.shipping_method = method
-    order.base_shipping_price = method.channel_listings.get(
-        channel=order.channel
-    ).price - Money(discount_amount, currency)
     order.voucher = voucher_shipping_type
     order.save()
+
+    voucher_listing = voucher_shipping_type.channel_listings.get(channel=order.channel)
 
     order.discounts.create(
         type=DiscountType.VOUCHER,
         value_type=DiscountValueType.FIXED,
-        value=discount_amount,
         name=voucher_shipping_type.code,
         currency=currency,
-        amount_value=discount_amount,
+        value=voucher_listing.discount_value,
         voucher=voucher_shipping_type,
     )
     channel = order.channel
     shipping_channel_listings = method.channel_listings.get(channel=channel)
     shipping_price = shipping_channel_listings.price
 
-    apply_order_discounts(order, lines)
+    calculate_prices(order, lines)
 
     # when
     update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
@@ -404,7 +575,7 @@ def test_calculate_order_shipping_voucher_on_shipping(
     # then
     price = order.shipping_price
     price = quantize_price(price, price.currency)
-    expected_gross_amount = shipping_price.amount - discount_amount
+    expected_gross_amount = shipping_price.amount - voucher_listing.discount_value
     assert price == TaxedMoney(
         net=quantize_price(
             Money(expected_gross_amount / Decimal("1.23"), currency), currency
@@ -454,9 +625,9 @@ def test_calculate_order_shipping_free_shipping_voucher(
     assert price == zero_taxed_money(currency)
 
 
-def test_update_taxes_for_order_lines(order_with_lines):
+def test_update_taxes_for_order_lines(order_with_lines_untaxed):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     currency = order.currency
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
@@ -486,10 +657,10 @@ def test_update_taxes_for_order_lines(order_with_lines):
 
 
 def test_update_taxes_for_order_lines_voucher_on_entire_order(
-    order_with_lines, voucher
+    order_with_lines_untaxed, voucher
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     currency = order.currency
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
@@ -512,7 +683,7 @@ def test_update_taxes_for_order_lines_voucher_on_entire_order(
     )
 
     # when
-    apply_order_discounts(order, lines)
+    calculate_prices(order, lines)
     lines, _ = update_taxes_for_order_lines(
         order, lines, country_code, Decimal(23), prices_entered_with_tax
     )
@@ -550,10 +721,10 @@ def test_update_taxes_for_order_lines_voucher_on_entire_order(
 
 
 def test_update_taxes_for_order_lines_voucher_on_shipping(
-    order_with_lines, voucher_shipping_type
+    order_with_lines_untaxed, voucher_shipping_type
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     currency = order.currency
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
@@ -561,17 +732,7 @@ def test_update_taxes_for_order_lines_voucher_on_shipping(
     country_code = get_order_country(order)
 
     order.voucher = voucher_shipping_type
-    lines = list(order.lines.all())
-    total_amount = sum([line.base_unit_price.amount * line.quantity for line in lines])
-    order.undiscounted_total_gross_amount = total_amount
-    order.undiscounted_total_net_amount = total_amount
-    order.save(
-        update_fields=[
-            "voucher",
-            "undiscounted_total_gross_amount",
-            "undiscounted_total_net_amount",
-        ]
-    )
+    order.save(update_fields=["voucher"])
 
     order_discount_amount = Decimal("5.0")
     order.discounts.create(
@@ -607,16 +768,15 @@ def test_update_taxes_for_order_lines_voucher_on_shipping(
 
 
 def test_update_taxes_for_order_line_on_promotion(
-    order_with_lines, order_line_on_promotion
+    order_with_lines_untaxed, order_line_on_promotion
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     currency = order.currency
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     country_code = get_order_country(order)
 
-    line = order_with_lines.lines.first()
     order_line_on_promotion.order = order
     order_line_on_promotion.save(update_fields=["order"])
 
@@ -657,30 +817,25 @@ def test_update_taxes_for_order_line_on_promotion(
 
 
 def test_use_original_tax_rate_when_tax_class_is_removed_from_order_line(
-    order_with_lines,
+    order_with_lines_untaxed,
 ):
     # given
-    order = order_with_lines
+    order = order_with_lines_untaxed
     prices_entered_with_tax = True
     _enable_flat_rates(order, prices_entered_with_tax)
     lines = order.lines.all()
     update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
-    apply_order_discounts(order_with_lines, lines)
+    OrderLine.objects.bulk_update(lines, ["tax_rate"])
+
+    assert order.total == TaxedMoney(
+        net=Money("65.04", "USD"), gross=Money("80.00", "USD")
+    )
 
     # when
-    for line in lines:
-        tax_class = line.variant.product.tax_class
-        if tax_class:
-            tax_class.delete()
-        tax_class = line.variant.product.product_type.tax_class
-        if tax_class:
-            tax_class.delete()
-        line.refresh_from_db()
+    TaxClass.objects.all().delete()
 
-    shipping_tax_class = order.shipping_method.tax_class
-    if shipping_tax_class:
-        shipping_tax_class.delete()
-        order.shipping_method.refresh_from_db()
+    order.refresh_from_db()
+    lines = order.lines.all()
 
     update_order_prices_with_flat_rates(order, lines, prices_entered_with_tax)
 
@@ -691,11 +846,11 @@ def test_use_original_tax_rate_when_tax_class_is_removed_from_order_line(
 
 
 def test_use_default_country_rate_when_no_tax_class_was_set_before(
-    order_with_lines,
+    order_with_lines_untaxed,
 ):
     # given
     manager = get_plugins_manager(allow_replica=False)
-    order = order_with_lines
+    order = order_with_lines_untaxed
     country = get_order_country(order)
     TaxClassCountryRate.objects.create(country=country, rate=20)
 
@@ -706,7 +861,7 @@ def test_use_default_country_rate_when_no_tax_class_was_set_before(
     # drop tax classes from lines and shipping, so that default country rate is used
     for line in lines:
         line.tax_class = None
-        line.tax_rate = Decimal("0")
+        line.tax_rate = Decimal(0)
         line.tax_class_name = None
         line.save(
             update_fields=[
@@ -719,7 +874,7 @@ def test_use_default_country_rate_when_no_tax_class_was_set_before(
     order.shipping_method.tax_class.delete()
     order.shipping_tax_class = None
     order.shipping_tax_class_name = None
-    order.shipping_tax_rate = Decimal("0")
+    order.shipping_tax_rate = Decimal(0)
     order.status = OrderStatus.DRAFT
     order.save(
         update_fields=[

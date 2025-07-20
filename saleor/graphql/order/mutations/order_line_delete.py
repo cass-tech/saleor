@@ -14,13 +14,14 @@ from ....order.utils import (
 from ....permission.enums import OrderPermissions
 from ...app.dataloaders import get_app_promise
 from ...core import ResolveInfo
+from ...core.context import SyncWebhookControlContext
 from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.mutations import BaseMutation
 from ...core.types import OrderError
 from ...core.utils import raise_validation_error
 from ...plugins.dataloaders import get_plugin_manager_promise
 from ..types import Order, OrderLine
-from .utils import EditableOrderValidationMixin, get_webhook_handler_by_order_status
+from .utils import EditableOrderValidationMixin, call_event_by_order_status
 
 
 class OrderLineDelete(EditableOrderValidationMixin, BaseMutation):
@@ -94,13 +95,22 @@ class OrderLineDelete(EditableOrderValidationMixin, BaseMutation):
             invalidate_order_prices(order)
             recalculate_order_weight(order)
             update_order_search_vector(order, save=False)
+            order.lines_count = order.lines.count()
             updated_fields.extend(
-                ["should_refresh_prices", "weight", "search_vector", "updated_at"]
+                [
+                    "should_refresh_prices",
+                    "weight",
+                    "search_vector",
+                    "updated_at",
+                    "lines_count",
+                ]
             )
             order.save(update_fields=updated_fields)
-            func = get_webhook_handler_by_order_status(order.status, manager)
-            cls.call_event(func, order)
-        return OrderLineDelete(order=order, order_line=line)
+            call_event_by_order_status(order, manager)
+        return OrderLineDelete(
+            order=SyncWebhookControlContext(order),
+            order_line=SyncWebhookControlContext(line),
+        )
 
     @classmethod
     def validate(cls, info, order, line):

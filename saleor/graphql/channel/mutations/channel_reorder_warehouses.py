@@ -7,7 +7,6 @@ from ....channel.error_codes import ChannelErrorCode
 from ....core.tracing import traced_atomic_transaction
 from ....permission.enums import ChannelPermissions
 from ...core import ResolveInfo
-from ...core.descriptions import ADDED_IN_37
 from ...core.doc_category import DOC_CATEGORY_CHANNELS
 from ...core.inputs import ReorderInput
 from ...core.mutations import BaseMutation
@@ -36,7 +35,7 @@ class ChannelReorderWarehouses(BaseMutation):
         )
 
     class Meta:
-        description = "Reorder the warehouses of a channel." + ADDED_IN_37
+        description = "Reorder the warehouses of a channel."
         doc_category = DOC_CATEGORY_CHANNELS
         permissions = (ChannelPermissions.MANAGE_CHANNELS,)
         error_type_class = ChannelError
@@ -90,7 +89,7 @@ class ChannelReorderWarehouses(BaseMutation):
             for warehouse_data in warehouses_m2m.values("id", "warehouse_id")
         }
         operations: defaultdict[str, int] = defaultdict(int)
-        for warehouse_pk, move in zip(warehouse_pks, moves):
+        for warehouse_pk, move in zip(warehouse_pks, moves, strict=False):
             warehouse_m2m_id = warehouse_id_to_warehouse_m2m_id[warehouse_pk]
             operations[warehouse_m2m_id] += move.sort_order
 

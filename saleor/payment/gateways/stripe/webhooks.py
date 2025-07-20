@@ -1,9 +1,8 @@
 import logging
-from typing import Optional, cast
+from typing import cast
 
 import stripe
 from django.core.exceptions import ValidationError
-from django.core.handlers.wsgi import WSGIRequest
 from django.db.models import Prefetch
 from django.http import HttpResponse
 from stripe.error import SignatureVerificationError
@@ -14,6 +13,7 @@ from ....checkout.complete_checkout import complete_checkout
 from ....checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ....checkout.models import Checkout
 from ....core.transactions import transaction_with_commit_on_errors
+from ....graphql.core import SaleorContext
 from ....order.actions import order_charged, order_refunded, order_voided
 from ....order.fetch import fetch_order_info
 from ....order.models import Order
@@ -49,10 +49,10 @@ logger = logging.getLogger(__name__)
 
 @transaction_with_commit_on_errors()
 def handle_webhook(
-    request: WSGIRequest, gateway_config: "GatewayConfig", channel_slug: str
+    request: SaleorContext, gateway_config: "GatewayConfig", channel_slug: str
 ):
     payload = request.body
-    sig_header = request.META["HTTP_STRIPE_SIGNATURE"]
+    sig_header = request.headers["stripe-signature"]
     api_key = gateway_config.connection_params["secret_api_key"]
     endpoint_secret = gateway_config.connection_params.get("webhook_secret")
 
@@ -72,12 +72,12 @@ def handle_webhook(
     except ValueError as e:
         # Invalid payload
         logger.warning(
-            "Received invalid payload for Stripe webhook", extra={"error": e}
+            "Received invalid payload for Stripe webhook", extra={"error": str(e)}
         )
         return HttpResponse(status=400)
     except SignatureVerificationError as e:
         # Invalid signature
-        logger.warning("Invalid signature for Stripe webhook", extra={"error": e})
+        logger.warning("Invalid signature for Stripe webhook", extra={"error": str(e)})
         return HttpResponse(status=400)
 
     webhook_handlers = {
@@ -112,15 +112,16 @@ def _channel_slug_is_different_from_payment_channel_slug(
     order = payment.order
     if checkout is not None:
         return channel_slug != checkout.channel.slug
-    elif order is not None:
+    if order is not None:
         return channel_slug != order.channel.slug
-    else:
-        raise ValueError(
-            "Both payment.checkout and payment.order cannot be None"
-        )  # pragma: no cover
+    logger.warning(
+        "Both payment.checkout and payment.order cannot be None",
+        extra={"payment_id": payment.id},
+    )
+    return True
 
 
-def _get_payment(payment_intent_id: str, with_lock=True) -> Optional[Payment]:
+def _get_payment(payment_intent_id: str, with_lock=True) -> Payment | None:
     qs = Payment.objects.prefetch_related(
         Prefetch("checkout", queryset=Checkout.objects.select_related("channel")),
         Prefetch("order", queryset=Order.objects.select_related("channel")),
@@ -130,7 +131,7 @@ def _get_payment(payment_intent_id: str, with_lock=True) -> Optional[Payment]:
     return qs.filter(transactions__token=payment_intent_id).first()
 
 
-def _get_checkout(payment_id: int) -> Optional[Checkout]:
+def _get_checkout(payment_id: int) -> Checkout | None:
     return (
         Checkout.objects.prefetch_related("payments")
         .select_for_update(of=("self",))
@@ -218,8 +219,9 @@ def _finalize_checkout(
             app=None,
         )
     except ValidationError as e:
-        logger.info("Failed to complete checkout %s.", checkout.pk, extra={"error": e})
-        return None
+        logger.info(
+            "Failed to complete checkout %s.", checkout.pk, extra={"error": str(e)}
+        )
 
 
 def _get_or_create_transaction(

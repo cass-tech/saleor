@@ -12,7 +12,7 @@ from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ...core.prices import quantize_price
 from ...discount import DiscountType
 from ...discount.models import PromotionRule
-from ...discount.utils import (
+from ...discount.utils.checkout import (
     create_or_update_discount_objects_from_promotion_for_checkout,
 )
 from ...plugins.manager import get_plugins_manager
@@ -212,7 +212,7 @@ def test_serialize_checkout_lines(
 
     # then
     checkout_with_items_for_cc.refresh_from_db()
-    for data, line_info in zip(checkout_lines_data, checkout_lines):
+    for data, line_info in zip(checkout_lines_data, checkout_lines, strict=False):
         variant = line_info.line.variant
         product = variant.product
         variant_channel_listing = line_info.channel_listing
@@ -252,7 +252,7 @@ def test_serialize_checkout_lines_with_promotion(checkout_with_item_on_promotion
     # then
     checkout.refresh_from_db()
     assert len(checkout_lines) == 1
-    for data, line_info in zip(checkout_lines_data, checkout_lines):
+    for data, line_info in zip(checkout_lines_data, checkout_lines, strict=False):
         variant = line_info.line.variant
         product = variant.product
         variant_channel_listing = line_info.channel_listing
@@ -306,17 +306,15 @@ def test_serialize_checkout_lines_for_tax_calculation(
     )
 
     # then
-    for data, line_info in zip(checkout_lines_data, lines):
+    for data, line_info in zip(checkout_lines_data, lines, strict=False):
         line = line_info.line
         variant = line.variant
         product = variant.product
 
         total_price = base_calculations.calculate_base_line_total_price(
-            line_info, checkout_info.channel
+            line_info
         ).amount
-        unit_price = base_calculations.calculate_base_line_unit_price(
-            line_info, checkout_info.channel
-        ).amount
+        unit_price = base_calculations.calculate_base_line_unit_price(line_info).amount
 
         assert data == {
             "id": graphene.Node.to_global_id("CheckoutLine", line.pk),
@@ -368,17 +366,15 @@ def test_serialize_checkout_lines_for_tax_calculation_with_promotion(
     )
 
     # then
-    for data, line_info in zip(checkout_lines_data, lines):
+    for data, line_info in zip(checkout_lines_data, lines, strict=False):
         line = line_info.line
         variant = line.variant
         product = variant.product
 
         total_price = base_calculations.calculate_base_line_total_price(
-            line_info, checkout_info.channel
+            line_info
         ).amount
-        unit_price = base_calculations.calculate_base_line_unit_price(
-            line_info, checkout_info.channel
-        ).amount
+        unit_price = base_calculations.calculate_base_line_unit_price(line_info).amount
 
         assert data == {
             "id": graphene.Node.to_global_id("CheckoutLine", line.pk),

@@ -1,12 +1,10 @@
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import Adyen
-import opentracing
-import opentracing.tags
 from Adyen.httpclient import HTTPClient
 from django.conf import settings
 from django_countries.fields import Country
@@ -25,6 +23,7 @@ from .....checkout.fetch import (
 )
 from .....checkout.models import Checkout
 from .....checkout.utils import get_checkout_metadata, is_shipping_required
+from .....core.telemetry import saleor_attributes, tracer
 from .....payment.models import Payment
 from .....plugins.manager import get_plugins_manager
 from .... import PaymentError
@@ -82,16 +81,16 @@ def get_tax_percentage_in_adyen_format(total_gross, total_net):
 
 
 def api_call(
-    request_data: Optional[dict[str, Any]], method: Callable, **kwargs
+    request_data: dict[str, Any] | None, method: Callable, **kwargs
 ) -> Adyen.Adyen:
     try:
         return method(request_data, **kwargs)
     except (Adyen.AdyenError, ValueError, TypeError, ConnectTimeout) as e:
-        logger.warning(f"Unable to process the payment: {e}")
-        raise PaymentError(f"Unable to process the payment request: {e}.")
+        logger.warning("Unable to process the payment: %s", e)
+        raise PaymentError(f"Unable to process the payment request: {e}.") from e
 
 
-def prepare_address_request_data(address: Optional["AddressData"]) -> Optional[dict]:
+def prepare_address_request_data(address: Optional["AddressData"]) -> dict | None:
     """Create address structure for Adyen request.
 
     The sample recieved from Adyen team:
@@ -245,9 +244,9 @@ def get_shipping_data(manager, checkout_info, lines):
         "amountExcludingTax": price_to_minor_unit(total_net, currency),
         "taxPercentage": tax_percentage_in_adyen_format,
         "description": (
-            f"Shipping - {checkout_info.delivery_method_info.delivery_method.name}"
+            f"Shipping - {checkout_info.get_delivery_method_info().delivery_method.name}"
         ),
-        "id": f"Shipping:{checkout_info.delivery_method_info.delivery_method.id}",
+        "id": f"Shipping:{checkout_info.get_delivery_method_info().delivery_method.id}",
         "taxAmount": price_to_minor_unit(tax_amount, currency),
         "amountIncludingTax": price_to_minor_unit(total_gross, currency),
     }
@@ -302,8 +301,9 @@ def append_checkout_details(payment_information: "PaymentData", payment_data: di
         }
         line_items.append(line_data)
 
-    if checkout_info.delivery_method_info.delivery_method and is_shipping_required(
-        lines
+    if (
+        checkout_info.get_delivery_method_info().delivery_method
+        and is_shipping_required(lines)
     ):
         line_items.append(get_shipping_data(manager, checkout_info, lines))
 
@@ -338,7 +338,7 @@ def get_shopper_locale_value(country_code: str):
 
 def request_data_for_gateway_config(
     checkout_info: "CheckoutInfo",
-    lines: Optional[Iterable[CheckoutLineInfo]],
+    lines: list[CheckoutLineInfo] | None,
     merchant_account,
 ) -> dict[str, Any]:
     manager = get_plugins_manager(allow_replica=False)
@@ -357,7 +357,12 @@ def request_data_for_gateway_config(
         country_code = country.code
     else:
         country_code = Country(settings.DEFAULT_COUNTRY).code
-    channel = get_checkout_metadata(checkout).get_value_from_metadata("channel", "web")
+    checkout_metadata = get_checkout_metadata(checkout)
+    if checkout_metadata:
+        channel = checkout_metadata.get_value_from_metadata("channel", "web")
+    else:
+        channel = "web"
+
     return {
         "merchantAccount": merchant_account,
         "countryCode": country_code,
@@ -439,10 +444,8 @@ def call_refund(
         merchant_account=merchant_account,
         token=token,
     )
-    with opentracing.global_tracer().start_active_span("adyen.payment.refund") as scope:
-        span = scope.span
-        span.set_tag(opentracing.tags.COMPONENT, "payment")
-        span.set_tag("service.name", "adyen")
+    with tracer.start_as_current_span("adyen.payment.refund") as span:
+        span.set_attribute(saleor_attributes.COMPONENT, "payment")
         return api_call(request, adyen_client.payment.refund)
 
 
@@ -459,12 +462,8 @@ def call_capture(
         merchant_account=merchant_account,
         token=token,
     )
-    with opentracing.global_tracer().start_active_span(
-        "adyen.payment.capture"
-    ) as scope:
-        span = scope.span
-        span.set_tag(opentracing.tags.COMPONENT, "payment")
-        span.set_tag("service.name", "adyen")
+    with tracer.start_as_current_span("adyen.payment.capture") as span:
+        span.set_attribute(saleor_attributes.COMPONENT, "payment")
         return api_call(request, adyen_client.payment.capture)
 
 

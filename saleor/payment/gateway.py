@@ -1,6 +1,7 @@
 import logging
+from collections.abc import Callable
 from decimal import Decimal
-from typing import TYPE_CHECKING, Callable, Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 from ..account.models import User
 from ..app.models import App
@@ -85,11 +86,11 @@ def with_locked_payment(fn: Callable) -> Callable:
 def request_charge_action(
     transaction: TransactionItem,
     manager: "PluginsManager",
-    charge_value: Optional[Decimal],
+    charge_value: Decimal | None,
     request_event: TransactionEvent,
     channel_slug: str,
-    user: Optional[User],
-    app: Optional[App],
+    user: User | None,
+    app: App | None,
 ):
     if charge_value is None:
         charge_value = transaction.authorized_value
@@ -121,12 +122,12 @@ def request_charge_action(
 def request_refund_action(
     transaction: TransactionItem,
     manager: "PluginsManager",
-    refund_value: Optional[Decimal],
+    refund_value: Decimal | None,
     request_event: TransactionEvent,
     channel_slug: str,
-    user: Optional[User],
-    app: Optional[App],
-    granted_refund: Optional[OrderGrantedRefund] = None,
+    user: User | None,
+    app: App | None,
+    granted_refund: OrderGrantedRefund | None = None,
 ):
     if refund_value is None:
         refund_value = transaction.charged_value
@@ -160,13 +161,16 @@ def request_refund_action(
 def request_cancelation_action(
     transaction: TransactionItem,
     manager: "PluginsManager",
-    cancel_value: Optional[Decimal],
+    cancel_value: Decimal | None,
     request_event: TransactionEvent,
     channel_slug: str,
-    user: Optional[User],
-    app: Optional[App],
+    user: User | None,
+    app: App | None,
     action: str,
 ):
+    if cancel_value is None:
+        cancel_value = transaction.authorized_value
+
     transaction_action_data = _create_transaction_data(
         transaction=transaction,
         action_type=action,
@@ -194,9 +198,9 @@ def request_cancelation_action(
 def _create_transaction_data(
     transaction: TransactionItem,
     action_type: str,
-    action_value: Optional[Decimal],
+    action_value: Decimal,
     request_event: TransactionEvent,
-    granted_refund: Optional[OrderGrantedRefund] = None,
+    granted_refund: OrderGrantedRefund | None = None,
 ):
     app_owner = None
     if transaction.app_id:
@@ -222,7 +226,7 @@ def _create_transaction_data(
 
 
 def _request_payment_action(
-    transaction_action_data: "TransactionActionData",
+    transaction_action_data: TransactionActionData,
     manager: "PluginsManager",
     channel_slug: str,
     event_type: str,
@@ -262,9 +266,9 @@ def process_payment(
     token: str,
     manager: "PluginsManager",
     channel_slug: str,
-    customer_id: Optional[str] = None,
+    customer_id: str | None = None,
     store_source: bool = False,
-    additional_data: Optional[dict] = None,
+    additional_data: dict | None = None,
 ) -> Transaction:
     payment_data = create_payment_information(
         payment=payment,
@@ -303,7 +307,7 @@ def authorize(
     token: str,
     manager: "PluginsManager",
     channel_slug: str,
-    customer_id: Optional[str] = None,
+    customer_id: str | None = None,
     store_source: bool = False,
 ) -> Transaction:
     clean_authorize(payment)
@@ -340,8 +344,8 @@ def capture(
     payment: Payment,
     manager: "PluginsManager",
     channel_slug: str,
-    amount: Optional[Decimal] = None,
-    customer_id: Optional[str] = None,
+    amount: Decimal | None = None,
+    customer_id: str | None = None,
     store_source: bool = False,
 ) -> Transaction:
     if amount is None:
@@ -380,7 +384,7 @@ def refund(
     payment: Payment,
     manager: "PluginsManager",
     channel_slug: str,
-    amount: Optional[Decimal] = None,
+    amount: Decimal | None = None,
     refund_data: Optional["RefundData"] = None,
 ) -> Transaction:
     if amount is None:
@@ -452,7 +456,7 @@ def confirm(
     payment: Payment,
     manager: "PluginsManager",
     channel_slug: str,
-    additional_data: Optional[dict] = None,
+    additional_data: dict | None = None,
 ) -> Transaction:
     txn = payment.transactions.filter(
         kind=TransactionKind.ACTION_TO_CONFIRM, is_success=True
@@ -487,13 +491,13 @@ def list_payment_sources(
     gateway: str,
     customer_id: str,
     manager: "PluginsManager",
-    channel_slug: Optional[str],
+    channel_slug: str | None,
 ) -> list["CustomerSource"]:
     return manager.list_payment_sources(gateway, customer_id, channel_slug=channel_slug)
 
 
 def list_gateways(
-    manager: "PluginsManager", channel_slug: Optional[str] = None
+    manager: "PluginsManager", channel_slug: str | None = None
 ) -> list["PaymentGateway"]:
     return manager.list_payment_gateways(channel_slug=channel_slug)
 
@@ -532,10 +536,10 @@ def _validate_refund_amount(payment: Payment, amount: Decimal):
 
 
 def payment_refund_or_void(
-    payment: Optional[Payment],
+    payment: Payment | None,
     manager: "PluginsManager",
-    channel_slug: Optional[str],
-    transaction_id: Optional[str] = None,
+    channel_slug: str | None,
+    transaction_id: str | None = None,
 ):
     if payment is None:
         return
@@ -563,13 +567,13 @@ def payment_refund_or_void(
 
 
 def _get_success_transaction(
-    kind: str, payment: Payment, transaction_id: Optional[str]
-):
+    kind: str, payment: Payment, transaction_id: str | None
+) -> None | Transaction:
     if not transaction_id:
         try:
             transaction_id = _get_past_transaction_token(payment, kind)
         except PaymentError:
-            return
+            return None
     return payment.transactions.filter(
         token=transaction_id,
         action_required=False,

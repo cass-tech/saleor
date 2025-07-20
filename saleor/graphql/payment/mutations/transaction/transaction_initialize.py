@@ -1,5 +1,4 @@
 import uuid
-from typing import Optional
 
 import graphene
 from django.conf import settings
@@ -7,6 +6,8 @@ from django.core.exceptions import ValidationError
 
 from .....app.models import App
 from .....channel.models import Channel
+from .....checkout import models as checkout_models
+from .....checkout.utils import activate_payments, cancel_active_payments
 from .....core.exceptions import PermissionDenied
 from .....payment import TransactionItemIdempotencyUniqueError
 from .....payment.interface import PaymentGatewayData
@@ -14,12 +15,6 @@ from .....payment.utils import handle_transaction_initialize_session
 from .....permission.enums import PaymentPermissions
 from ....app.dataloaders import get_app_promise
 from ....channel.enums import TransactionFlowStrategyEnum
-from ....core.descriptions import (
-    ADDED_IN_313,
-    ADDED_IN_314,
-    ADDED_IN_316,
-    PREVIEW_FEATURE,
-)
 from ....core.doc_category import DOC_CATEGORY_PAYMENTS
 from ....core.enums import TransactionInitializeErrorCode
 from ....core.scalars import JSON, PositiveDecimal
@@ -61,7 +56,7 @@ class TransactionInitialize(TransactionSessionBase):
                 "The idempotency key assigned to the action. It will be passed to the "
                 "payment app to discover potential duplicate actions. If not provided, "
                 "the default one will be generated. If empty string provided, INVALID "
-                "error code will be raised." + ADDED_IN_314
+                "error code will be raised."
             )
         )
         action = graphene.Argument(
@@ -80,7 +75,7 @@ class TransactionInitialize(TransactionSessionBase):
                 "The customer's IP address will be passed to the payment app. "
                 "The IP should be in ipv4 or ipv6 format. "
                 "The field can be used only by an app that has `HANDLE_PAYMENTS` "
-                "permission." + ADDED_IN_316
+                "permission."
             )
         )
         payment_gateway = graphene.Argument(
@@ -95,12 +90,12 @@ class TransactionInitialize(TransactionSessionBase):
             "Initializes a transaction session. It triggers the webhook "
             "`TRANSACTION_INITIALIZE_SESSION`, to the requested `paymentGateways`. "
             f"There is a limit of {settings.TRANSACTION_ITEMS_LIMIT} transaction "
-            "items per checkout / order." + ADDED_IN_313 + PREVIEW_FEATURE
+            "items per checkout / order."
         )
         error_type_class = common_types.TransactionInitializeError
 
     @classmethod
-    def clean_action(cls, info, action: Optional[str], channel: "Channel"):
+    def clean_action(cls, info, action: str | None, channel: "Channel"):
         if not action:
             return channel.default_transaction_flow_strategy
         app = get_app_promise(info.context).get()
@@ -127,7 +122,7 @@ class TransactionInitialize(TransactionSessionBase):
         return app
 
     @classmethod
-    def clean_idempotency_key(cls, idempotency_key: Optional[str]):
+    def clean_idempotency_key(cls, idempotency_key: str | None):
         if not idempotency_key and isinstance(idempotency_key, str):
             raise ValidationError(
                 {
@@ -142,7 +137,7 @@ class TransactionInitialize(TransactionSessionBase):
         return idempotency_key
 
     @classmethod
-    def perform_mutation(
+    def perform_mutation(  # type: ignore[override]
         cls,
         root,
         info,
@@ -165,6 +160,9 @@ class TransactionInitialize(TransactionSessionBase):
             TransactionInitializeErrorCode.NOT_FOUND.value,
             manager=manager,
         )
+        if isinstance(source_object, checkout_models.Checkout):
+            cls.validate_checkout(source_object)
+
         idempotency_key = cls.clean_idempotency_key(idempotency_key)
         action = cls.clean_action(info, action, source_object.channel)
         customer_ip_address = clean_customer_ip_address(
@@ -178,6 +176,11 @@ class TransactionInitialize(TransactionSessionBase):
             amount,
         )
         app = cls.clean_app_from_payment_gateway(payment_gateway_data)
+        payment_ids = []
+        if isinstance(source_object, checkout_models.Checkout):
+            # Deactivate active payment objects to avoid processing checkout
+            # with use of two different flows.
+            payment_ids = cancel_active_payments(source_object)
         try:
             transaction, event, data = handle_transaction_initialize_session(
                 source_object=source_object,
@@ -189,7 +192,9 @@ class TransactionInitialize(TransactionSessionBase):
                 manager=manager,
                 idempotency_key=idempotency_key,
             )
-        except TransactionItemIdempotencyUniqueError:
+        except TransactionItemIdempotencyUniqueError as e:
+            if payment_ids:
+                activate_payments(payment_ids)
             raise ValidationError(
                 {
                     "idempotency_key": ValidationError(
@@ -200,5 +205,23 @@ class TransactionInitialize(TransactionSessionBase):
                         code=TransactionInitializeErrorCode.UNIQUE.value,
                     )
                 }
-            )
+            ) from e
         return cls(transaction=transaction, transaction_event=event, data=data)
+
+    @staticmethod
+    def validate_checkout(checkout: checkout_models.Checkout) -> None:
+        if checkout.is_checkout_locked():
+            error_code = (
+                TransactionInitializeErrorCode.CHECKOUT_COMPLETION_IN_PROGRESS.value
+            )
+            raise ValidationError(
+                {
+                    "id": ValidationError(
+                        "Transaction cannot be initialized - the checkout completion "
+                        "is currently in progress. Please wait until the process is "
+                        f"finished (max {settings.CHECKOUT_COMPLETION_LOCK_TIME} "
+                        "seconds).",
+                        code=error_code,
+                    )
+                }
+            )

@@ -11,6 +11,11 @@ mutation OrderDraftCreate($input: DraftOrderCreateInput!) {
     order {
       id
       created
+      status
+      user {
+        id
+        email
+      }
       discounts {
         amount {
           amount
@@ -20,6 +25,7 @@ mutation OrderDraftCreate($input: DraftOrderCreateInput!) {
         code
         id
       }
+      voucherCode
       billingAddress {
         streetAddress1
       }
@@ -30,28 +36,53 @@ mutation OrderDraftCreate($input: DraftOrderCreateInput!) {
       shippingMethods {
         id
       }
+      undiscountedTotal {
+        ... BaseTaxedMoney
+      }
+      total {
+        ... BaseTaxedMoney
+      }
+      shippingPrice {
+        ... BaseTaxedMoney
+      }
       lines {
+        id
         productVariantId
         quantity
         undiscountedUnitPrice {
-          gross {
-            amount
-          }
+          ... BaseTaxedMoney
         }
         unitPrice {
-          gross {
-            amount
-          }
+          ... BaseTaxedMoney
+        }
+        undiscountedTotalPrice {
+          ... BaseTaxedMoney
         }
         totalPrice {
-          gross {
-            amount
-          }
+          ... BaseTaxedMoney
         }
+        unitDiscount {
+            amount
+        }
+        unitDiscountReason
       }
     }
   }
 }
+
+fragment BaseTaxedMoney on TaxedMoney {
+  gross {
+    amount
+  }
+  net {
+    amount
+  }
+  tax {
+    amount
+  }
+  currency
+}
+
 """
 
 

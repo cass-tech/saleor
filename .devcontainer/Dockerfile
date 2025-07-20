@@ -1,28 +1,26 @@
-FROM mcr.microsoft.com/devcontainers/python:3.9
+FROM mcr.microsoft.com/devcontainers/python:3.12
 
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONUNBUFFERED=1
 
+# Pillow dependencies
 RUN apt-get update \
   && apt-get install -y \
-  libcairo2 \
+  libffi8 \
   libgdk-pixbuf2.0-0 \
   liblcms2-2 \
   libopenjp2-7 \
-  libpango-1.0-0 \
-  libpangocairo-1.0-0 \
   libssl3 \
   libtiff6 \
   libwebp7 \
-  libxml2 \
   libpq5 \
   shared-mime-info \
-  mime-support
+  mime-support \
+  pipx
 
-RUN echo 'image/webp webp' >> /etc/mime.types
-RUN echo 'image/avif avif' >> /etc/mime.types
+RUN pipx ensurepath
 
 WORKDIR /app
-RUN pip install poetry==1.7.0
+RUN pipx install poetry==2.1.1
 RUN poetry config virtualenvs.create false
 COPY poetry.lock pyproject.toml /app/
-RUN poetry install --no-root
+RUN poetry sync

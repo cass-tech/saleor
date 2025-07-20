@@ -1,16 +1,13 @@
-from typing import Optional
-
 import graphene
-from graphene import relay
 
-from .enums import PageMediaType
-from .sorters import PageMediaSortingInput
-from ..core.utils import from_global_id_or_error
 from ...attribute import models as attribute_models
-from ...core.utils import build_absolute_uri
 from ...page import models
 from ...permission.enums import PagePermissions, PageTypePermissions
-from ..attribute.filters import AttributeFilterInput, AttributeWhereInput
+from ..attribute.filters import (
+    AttributeFilterInput,
+    AttributeWhereInput,
+    filter_attribute_search,
+)
 from ..attribute.types import Attribute, AttributeCountableConnection, SelectedAttribute
 from ..core import ResolveInfo
 from ..core.connection import (
@@ -18,14 +15,18 @@ from ..core.connection import (
     create_connection_slice,
     filter_connection_queryset,
 )
-from ..core.context import get_database_connection_name
-from ..core.descriptions import ADDED_IN_33, DEPRECATED_IN_3X_FIELD, RICH_CONTENT, \
-    ADDED_IN_312, ADDED_IN_39
+from ..core.context import (
+    ChannelContext,
+    ChannelQsContext,
+    get_database_connection_name,
+)
+from ..core.descriptions import DEPRECATED_IN_3X_INPUT, RICH_CONTENT
 from ..core.doc_category import DOC_CATEGORY_PAGES
 from ..core.federation import federated_entity, resolve_federation_references
 from ..core.fields import FilterConnectionField, JSONString, PermissionsField
-from ..core.scalars import Date
-from ..core.types import ModelObjectType, NonNullList, ThumbnailField
+from ..core.scalars import Date, DateTime
+from ..core.types import ModelObjectType, NonNullList
+from ..core.types.context import ChannelContextType
 from ..meta.types import ObjectWithMetadata
 from ..translations.fields import TranslationField
 from ..translations.types import PageTranslation
@@ -35,13 +36,11 @@ from .dataloaders import (
     PageAttributesVisibleInStorefrontByPageTypeIdLoader,
     PagesByPageTypeIdLoader,
     PageTypeByIdLoader,
+    SelectedAttributeAllByPageIdAttributeSlugLoader,
     SelectedAttributesAllByPageIdLoader,
     SelectedAttributesVisibleInStorefrontPageIdLoader,
-    ThumbnailByPageMediaIdSizeAndFormatLoader,
-    MediaByPageIdLoader
+    SelectedAttributeVisibleInStorefrontPageIdAttributeSlugLoader,
 )
-from ...thumbnail.utils import get_thumbnail_format, get_image_or_proxy_url, \
-    get_thumbnail_size
 
 
 @federated_entity("id")
@@ -54,8 +53,14 @@ class PageType(ModelObjectType[models.PageType]):
     )
     available_attributes = FilterConnectionField(
         AttributeCountableConnection,
-        filter=AttributeFilterInput(),
-        where=AttributeWhereInput(),
+        filter=AttributeFilterInput(
+            description="Filtering options for attributes. "
+            f"{DEPRECATED_IN_3X_INPUT} Use `where` filter instead."
+        ),
+        where=AttributeWhereInput(
+            description="Where filtering options for attributes."
+        ),
+        search=graphene.String(description="Search attributes."),
         description="Attributes that can be assigned to the page type.",
         permissions=[
             PagePermissions.MANAGE_PAGES,
@@ -85,22 +90,29 @@ class PageType(ModelObjectType[models.PageType]):
 
     @staticmethod
     def resolve_attributes(root: models.PageType, info: ResolveInfo):
+        def wrap_with_channel_context(attributes):
+            return [ChannelContext(attribute, None) for attribute in attributes]
+
         requestor = get_user_or_app_from_context(info.context)
         if (
             requestor
             and requestor.is_active
             and requestor.has_perm(PagePermissions.MANAGE_PAGES)
         ):
-            return PageAttributesAllByPageTypeIdLoader(info.context).load(root.pk)
-        else:
-            return PageAttributesVisibleInStorefrontByPageTypeIdLoader(
-                info.context
-            ).load(root.pk)
-        return PageAttributesAllByPageTypeIdLoader(info.context).load(root.pk)
+            return (
+                PageAttributesAllByPageTypeIdLoader(info.context)
+                .load(root.pk)
+                .then(wrap_with_channel_context)
+            )
+        return (
+            PageAttributesVisibleInStorefrontByPageTypeIdLoader(info.context)
+            .load(root.pk)
+            .then(wrap_with_channel_context)
+        )
 
     @staticmethod
     def resolve_available_attributes(
-        root: models.PageType, info: ResolveInfo, **kwargs
+        root: models.PageType, info: ResolveInfo, search=None, **kwargs
     ):
         qs = attribute_models.Attribute.objects.get_unassigned_page_type_attributes(
             root.pk
@@ -108,6 +120,9 @@ class PageType(ModelObjectType[models.PageType]):
         qs = filter_connection_queryset(
             qs, kwargs, info.context, allow_replica=info.context.allow_replica
         )
+        if search:
+            qs = filter_attribute_search(qs, None, search)
+        qs = ChannelQsContext(qs=qs, channel_slug=None)
         return create_connection_slice(qs, info, kwargs, AttributeCountableConnection)
 
     @staticmethod
@@ -132,21 +147,16 @@ class PageTypeCountableConnection(CountableConnection):
         node = PageType
 
 
-class Page(ModelObjectType[models.Page]):
+class Page(ChannelContextType[models.Page]):
     id = graphene.GlobalID(required=True, description="ID of the page.")
     seo_title = graphene.String(description="Title of the page for SEO.")
     seo_description = graphene.String(description="Description of the page for SEO.")
     title = graphene.String(required=True, description="Title of the page.")
     content = JSONString(description="Content of the page." + RICH_CONTENT)
     publication_date = Date(
-        deprecation_reason=(
-            f"{DEPRECATED_IN_3X_FIELD} "
-            "Use the `publishedAt` field to fetch the publication date."
-        ),
+        deprecation_reason="Use the `publishedAt` field to fetch the publication date."
     )
-    published_at = graphene.DateTime(
-        description="The page publication date." + ADDED_IN_33
-    )
+    published_at = DateTime(description="The page publication date.")
     is_published = graphene.Boolean(
         required=True, description="Determines if the page is published."
     )
@@ -154,35 +164,36 @@ class Page(ModelObjectType[models.Page]):
     page_type = graphene.Field(
         PageType, required=True, description="Determines the type of page"
     )
-    created = graphene.DateTime(
+    created = DateTime(
         required=True, description="Date and time at which page was created."
     )
     content_json = JSONString(
         description="Content of the page." + RICH_CONTENT,
-        deprecation_reason=f"{DEPRECATED_IN_3X_FIELD} Use the `content` field instead.",
+        deprecation_reason="Use the `content` field instead.",
         required=True,
     )
-    translation = TranslationField(PageTranslation, type_name="page")
+    translation = TranslationField(
+        PageTranslation,
+        type_name="page",
+        resolver=ChannelContextType.resolve_translation,
+    )
+    attribute = graphene.Field(
+        SelectedAttribute,
+        slug=graphene.Argument(
+            graphene.String,
+            description="Slug of the attribute",
+            required=True,
+        ),
+        description="Get a single attribute attached to page by attribute slug.",
+    )
     attributes = NonNullList(
         SelectedAttribute,
         required=True,
         description="List of attributes assigned to this page.",
     )
-    media_by_id = graphene.Field(
-        lambda: PageMedia,
-        id=graphene.Argument(graphene.ID, description="ID of a page media."),
-        description="Get a single page media by ID.",
-    )
-    media = NonNullList(
-        lambda: PageMedia,
-        sort_by=graphene.Argument(
-            PageMediaSortingInput, description=f"Sort media. {ADDED_IN_39}"
-        ),
-        description="List of media for the page.",
-    )
-    thumbnail = ThumbnailField(description="Thumbnail of the page media.")
 
     class Meta:
+        default_resolver = ChannelContextType.resolver_with_context
         description = (
             "A static page that can be manually added by a shop operator through the "
             "dashboard."
@@ -191,143 +202,96 @@ class Page(ModelObjectType[models.Page]):
         model = models.Page
 
     @staticmethod
-    def resolve_publication_date(root: models.Page, _info: ResolveInfo):
-        return root.published_at
+    def resolve_publication_date(root: ChannelContext[models.Page], _info: ResolveInfo):
+        return root.node.published_at
 
     @staticmethod
-    def resolve_created(root: models.Page, _info: ResolveInfo):
-        return root.created_at
+    def resolve_created(root: ChannelContext[models.Page], _info: ResolveInfo):
+        return root.node.created_at
 
     @staticmethod
-    def resolve_page_type(root: models.Page, info: ResolveInfo):
-        return PageTypeByIdLoader(info.context).load(root.page_type_id)
+    def resolve_page_type(root: ChannelContext[models.Page], info: ResolveInfo):
+        return PageTypeByIdLoader(info.context).load(root.node.page_type_id)
 
     @staticmethod
-    def resolve_content_json(root: models.Page, _info: ResolveInfo):
-        content = root.content
+    def resolve_content_json(root: ChannelContext[models.Page], _info: ResolveInfo):
+        content = root.node.content
         return content if content is not None else {}
 
     @staticmethod
-    def resolve_attributes(root: models.Page, info: ResolveInfo):
+    def resolve_attributes(root: ChannelContext[models.Page], info: ResolveInfo):
+        page = root.node
+
+        def wrap_with_channel_context(
+            attributes: list[dict[str, list]] | None,
+        ) -> list[SelectedAttribute] | None:
+            if attributes is None:
+                return None
+            return [
+                SelectedAttribute(
+                    attribute=ChannelContext(attribute["attribute"], root.channel_slug),
+                    values=[
+                        ChannelContext(value, root.channel_slug)
+                        for value in attribute["values"]
+                    ],
+                )
+                for attribute in attributes
+            ]
+
         requestor = get_user_or_app_from_context(info.context)
         if (
             requestor
             and requestor.is_active
             and requestor.has_perm(PagePermissions.MANAGE_PAGES)
         ):
-            return SelectedAttributesAllByPageIdLoader(info.context).load(root.id)
-        else:
-            return SelectedAttributesVisibleInStorefrontPageIdLoader(info.context).load(
-                root.id
+            return (
+                SelectedAttributesAllByPageIdLoader(info.context)
+                .load(page.id)
+                .then(wrap_with_channel_context)
             )
-
-
-    @staticmethod
-    def resolve_media_by_id(root: models.Page, info, *, id):
-        _type, pk = from_global_id_or_error(id, PageMedia)
         return (
-            root.media.using(get_database_connection_name(info.context))
-            .filter(pk=pk)
-            .first()
+            SelectedAttributesVisibleInStorefrontPageIdLoader(info.context)
+            .load(page.id)
+            .then(wrap_with_channel_context)
         )
 
     @staticmethod
-    def resolve_media(root: models.Page, info, sort_by=None):
-        if sort_by is None:
-            sort_by = {
-                "field": ["sort_order"],
-                "direction": "",
-            }
-
-        def sort_media(media) -> list[PageMedia]:
-            reversed = sort_by["direction"] == "-"
-
-            # Nullable first,
-            # achieved by adding the number of nonnull fields as firt element of tuple
-            def key(x):
-                values_tuple = tuple(
-                    getattr(x, field)
-                    for field in sort_by["field"]
-                    if getattr(x, field) is not None
-                )
-                values_tuple = (len(values_tuple),) + values_tuple
-                return values_tuple
-
-            media_sorted = sorted(
-                media,
-                key=key,
-                reverse=reversed,
-            )
-            return media_sorted
-        return MediaByPageIdLoader(info.context).load(root.id).then(sort_media)
-
-
-@federated_entity("id")
-class PageMedia(ModelObjectType[models.PageMedia]):
-    id = graphene.GlobalID(
-        required=True, description="The unique ID of the page media."
-    )
-    sort_order = graphene.Int(description="The sort order of the media.")
-    alt = graphene.String(required=True, description="The alt text of the media.")
-    type = PageMediaType(required=True, description="The type of the media.")
-    oembed_data = JSONString(required=True, description="The oEmbed data of the media.")
-    url = ThumbnailField(
-        graphene.String, required=True, description="The URL of the media."
-    )
-    page_id = graphene.ID(
-        description="Page id the media refers to." + ADDED_IN_312
-    )
-
-    class Meta:
-        description = "Represents a page media."
-        interfaces = [relay.Node, ObjectWithMetadata]
-        model = models.PageMedia
-        metadata_since = ADDED_IN_312
-
-    @staticmethod
-    def resolve_url(
-        root: models.PageMedia,
-        info,
-        *,
-        size: Optional[int] = None,
-        format: Optional[str] = None,
+    def resolve_attribute(
+        root: ChannelContext[models.Page], info: ResolveInfo, slug: str
     ):
-        if root.external_url:
-            return root.external_url
+        page = root.node
 
-        if not root.image:
-            return
-
-        if size == 0:
-            return build_absolute_uri(root.image.url)
-
-        format = get_thumbnail_format(format)
-        selected_size = get_thumbnail_size(size)
-
-        def _resolve_url(thumbnail):
-            url = get_image_or_proxy_url(
-                thumbnail, str(root.id), "PageMedia", selected_size, format
+        def wrap_with_channel_context(
+            attribute_data: dict[str, dict | list[dict]] | None,
+        ) -> SelectedAttribute | None:
+            if attribute_data is None:
+                return None
+            return SelectedAttribute(
+                attribute=ChannelContext(
+                    attribute_data["attribute"], root.channel_slug
+                ),
+                values=[
+                    ChannelContext(value, root.channel_slug)
+                    for value in attribute_data["values"]
+                ],
             )
-            return build_absolute_uri(url)
 
+        requestor = get_user_or_app_from_context(info.context)
+        if (
+            requestor
+            and requestor.is_active
+            and requestor.has_perm(PagePermissions.MANAGE_PAGES)
+        ):
+            return (
+                SelectedAttributeAllByPageIdAttributeSlugLoader(info.context)
+                .load((page.id, slug))
+                .then(wrap_with_channel_context)
+            )
         return (
-            ThumbnailByPageMediaIdSizeAndFormatLoader(info.context)
-            .load((root.id, selected_size, format))
-            .then(_resolve_url)
+            SelectedAttributeVisibleInStorefrontPageIdAttributeSlugLoader(info.context)
+            .load((page.id, slug))
+            .then(wrap_with_channel_context)
         )
-
-    @staticmethod
-    def __resolve_references(roots: list["PageMedia"], info):
-        database_connection_name = get_database_connection_name(info.context)
-        return resolve_federation_references(
-            PageMedia,
-            roots,
-            models.PageMedia.objects.using(database_connection_name),
-        )
-
-    @staticmethod
-    def resolve_page_id(root: models.PageMedia, info):
-        return graphene.Node.to_global_id("Page", root.page_id)
 
 
 class PageCountableConnection(CountableConnection):

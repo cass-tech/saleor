@@ -173,8 +173,7 @@ class ShippingZoneMixin:
                         )
                     }
                 )
-            else:
-                cls._extend_shipping_zone_countries(data)
+            cls._extend_shipping_zone_countries(data)
         else:
             data["default"] = False
         return data
@@ -270,9 +269,9 @@ class ShippingZoneMixin:
     def _extend_shipping_zone_countries(cls, data):
         countries = get_countries_without_shipping_zone()
         try:
-            data["countries"].extend([country for country in countries])
+            data["countries"].extend(list(countries))
         except (KeyError, AttributeError):
-            data["countries"] = [country for country in countries]
+            data["countries"] = list(countries)
 
 
 class ShippingPriceMixin:
@@ -390,14 +389,12 @@ class ShippingPriceMixin:
         ):
             if cleaned_input.get("minimum_delivery_days") is not None:
                 error_msg = (
-                    "Minimum delivery days should be lower "
-                    "than maximum delivery days."
+                    "Minimum delivery days should be lower than maximum delivery days."
                 )
                 field = "minimum_delivery_days"
             else:
                 error_msg = (
-                    "Maximum delivery days should be higher than "
-                    "minimum delivery days."
+                    "Maximum delivery days should be higher than minimum delivery days."
                 )
                 field = "maximum_delivery_days"
             errors[field] = ValidationError(
@@ -424,7 +421,7 @@ class ShippingPriceMixin:
                         instance.postal_code_rules.create(
                             start=start, end=end, inclusion_type=inclusion_type
                         )
-                    except IntegrityError:
+                    except IntegrityError as e:
                         raise ValidationError(
                             {
                                 "addPostalCodeRules": ValidationError(
@@ -432,7 +429,7 @@ class ShippingPriceMixin:
                                     code=ShippingErrorCode.ALREADY_EXISTS.value,
                                 )
                             }
-                        )
+                        ) from e
 
 
 class ShippingMethodTypeMixin:

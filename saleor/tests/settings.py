@@ -1,15 +1,9 @@
-import os
 import re
 from re import Pattern
-from typing import Union
 
 from django.utils.functional import SimpleLazyObject
 
-# Disable Jaeger tracing should be done before importing settings.
-# without this line pytest will start sending traces to Jaeger agent.
-os.environ["JAEGER_AGENT_HOST"] = ""
-
-from ..settings import *  # noqa
+from ..settings import *  # noqa: F403
 
 
 def lazy_re_compile(regex, flags=0):
@@ -19,9 +13,8 @@ def lazy_re_compile(regex, flags=0):
         # Compile the regex if it was not passed pre-compiled.
         if isinstance(regex, str):
             return re.compile(regex, flags)
-        else:
-            assert not flags, "flags must be empty if regex is passed pre-compiled"
-            return regex
+        assert not flags, "flags must be empty if regex is passed pre-compiled"
+        return regex
 
     return SimpleLazyObject(_compile)
 
@@ -33,10 +26,6 @@ CELERY_TASK_ALWAYS_EAGER = True
 SECRET_KEY = "NOTREALLY"
 
 ALLOWED_CLIENT_HOSTS = ["www.example.com"]
-
-TIME_ZONE = "America/Chicago"
-LANGUAGE_CODE = "en"
-
 
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 
@@ -55,7 +44,7 @@ OBSERVABILITY_REPORT_ALL_API_CALLS = False
 
 PLUGINS = []
 
-PATTERNS_IGNORED_IN_QUERY_CAPTURES: list[Union[Pattern, SimpleLazyObject]] = [
+PATTERNS_IGNORED_IN_QUERY_CAPTURES: list[Pattern | SimpleLazyObject] = [
     lazy_re_compile(r"^SET\s+")
 ]
 
@@ -97,3 +86,21 @@ HTTP_IP_FILTER_ENABLED = False
 HTTP_IP_FILTER_ALLOW_LOOPBACK_IPS = True
 
 MIDDLEWARE.insert(0, "saleor.core.db.connection.restrict_writer_middleware")  # noqa: F405
+
+CHECKOUT_WEBHOOK_EVENTS_CELERY_QUEUE_NAME = "checkout_events_queue"
+ORDER_WEBHOOK_EVENTS_CELERY_QUEUE_NAME = "order_events_queue"
+
+# Raise error when using writer DB in Celery tasks, without explicit "allow_writer"
+# context manager.
+CELERY_RESTRICT_WRITER_METHOD = "saleor.core.db.connection.restrict_writer"
+
+PRIVATE_FILE_STORAGE = "saleor.tests.storages.PrivateFileSystemStorage"
+PRIVATE_MEDIA_ROOT: str = os.path.join(PROJECT_ROOT, "private-media")  # noqa: F405
+
+BREAKER_BOARD_ENABLED = False
+
+# Enable exception raising for telemetry unit conversion errors
+# This helps identify unit conversion issues during development and testing
+TELEMETRY_RAISE_UNIT_CONVERSION_ERRORS = True
+TELEMETRY_TRACER_CLASS = "saleor.core.telemetry.tests.TestTracer"
+TELEMETRY_METER_CLASS = "saleor.core.telemetry.tests.TestMeter"

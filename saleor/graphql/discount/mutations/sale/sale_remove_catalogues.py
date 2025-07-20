@@ -1,13 +1,10 @@
-from typing import Optional
-
 from .....core.tracing import traced_atomic_transaction
 from .....discount.error_codes import DiscountErrorCode
 from .....discount.models import Promotion, PromotionRule
-from .....graphql.channel import ChannelContext
+from .....graphql.core.context import ChannelContext
 from .....permission.enums import DiscountPermissions
 from .....webhook.event_types import WebhookEventAsyncType
 from ....core import ResolveInfo
-from ....core.descriptions import DEPRECATED_IN_3X_MUTATION
 from ....core.doc_category import DOC_CATEGORY_DISCOUNTS
 from ....core.types import DiscountError
 from ....core.utils import (
@@ -26,11 +23,7 @@ from .sale_base_catalogue import SaleBaseCatalogueMutation
 
 class SaleRemoveCatalogues(SaleBaseCatalogueMutation):
     class Meta:
-        description = (
-            "Removes products, categories, collections from a sale."
-            + DEPRECATED_IN_3X_MUTATION
-            + " Use `promotionRuleUpdate` or `promotionRuleDelete` mutations instead."
-        )
+        description = "Removes products, categories, collections from a sale."
         doc_category = DOC_CATEGORY_DISCOUNTS
         permissions = (DiscountPermissions.MANAGE_DISCOUNTS,)
         error_type_class = DiscountError
@@ -91,7 +84,7 @@ class SaleRemoveCatalogues(SaleBaseCatalogueMutation):
     @classmethod
     def remove_items_from_catalogue(
         cls, rules: list[PromotionRule], previous_catalogue_info: CatalogueInfo, input
-    ) -> Optional[dict]:
+    ) -> dict | None:
         if not any(previous_catalogue_info):
             return previous_catalogue_info
 

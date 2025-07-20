@@ -1,11 +1,10 @@
-from datetime import datetime, timedelta
+import datetime
 from functools import partial
 from unittest import mock
 from unittest.mock import ANY
 
 import graphene
 import pytest
-import pytz
 from django.conf import settings
 from django.utils import timezone
 from django.utils.functional import SimpleLazyObject
@@ -930,6 +929,112 @@ def test_update_page_with_variant_reference_attribute_existing_value(
     assert page_type_variant_reference_attribute.values.count() == values_count
 
 
+def test_update_page_with_category_reference_attribute_new_value(
+    staff_api_client,
+    permission_manage_pages,
+    page,
+    page_type_category_reference_attribute,
+    category,
+):
+    # given
+    query = UPDATE_PAGE_MUTATION
+
+    page_type = page.page_type
+    page_type.page_attributes.add(page_type_category_reference_attribute)
+    values_count = page_type_category_reference_attribute.values.count()
+    ref_attribute_id = graphene.Node.to_global_id(
+        "Attribute", page_type_category_reference_attribute.pk
+    )
+    reference = graphene.Node.to_global_id("Category", category.pk)
+    page_id = graphene.Node.to_global_id("Page", page.id)
+
+    variables = {
+        "id": page_id,
+        "input": {"attributes": [{"id": ref_attribute_id, "references": [reference]}]},
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_pages]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["pageUpdate"]
+
+    assert not data["errors"]
+    assert data["page"]
+    updated_attribute = {
+        "attribute": {"slug": page_type_category_reference_attribute.slug},
+        "values": [
+            {
+                "slug": f"{page.pk}_{category.pk}",
+                "name": category.name,
+                "file": None,
+                "plainText": None,
+                "reference": reference,
+            }
+        ],
+    }
+    assert updated_attribute in data["page"]["attributes"]
+
+    page_type_category_reference_attribute.refresh_from_db()
+    assert page_type_category_reference_attribute.values.count() == values_count + 1
+
+
+def test_update_page_with_collection_reference_attribute_new_value(
+    staff_api_client,
+    permission_manage_pages,
+    page,
+    page_type_collection_reference_attribute,
+    collection,
+):
+    # given
+    query = UPDATE_PAGE_MUTATION
+
+    page_type = page.page_type
+    page_type.page_attributes.add(page_type_collection_reference_attribute)
+    values_count = page_type_collection_reference_attribute.values.count()
+    ref_attribute_id = graphene.Node.to_global_id(
+        "Attribute", page_type_collection_reference_attribute.pk
+    )
+    reference = graphene.Node.to_global_id("Collection", collection.pk)
+    page_id = graphene.Node.to_global_id("Page", page.id)
+
+    variables = {
+        "id": page_id,
+        "input": {"attributes": [{"id": ref_attribute_id, "references": [reference]}]},
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_pages]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["pageUpdate"]
+
+    assert not data["errors"]
+    assert data["page"]
+    updated_attribute = {
+        "attribute": {"slug": page_type_collection_reference_attribute.slug},
+        "values": [
+            {
+                "slug": f"{page.pk}_{collection.pk}",
+                "name": collection.name,
+                "file": None,
+                "plainText": None,
+                "reference": reference,
+            }
+        ],
+    }
+    assert updated_attribute in data["page"]["attributes"]
+
+    page_type_collection_reference_attribute.refresh_from_db()
+    assert page_type_collection_reference_attribute.values.count() == values_count + 1
+
+
 @freeze_time("2020-03-18 12:00:00")
 def test_public_page_sets_publication_date(
     staff_api_client, permission_manage_pages, page_type
@@ -952,7 +1057,10 @@ def test_public_page_sets_publication_date(
 
     assert not data["errors"]
     assert data["page"]["isPublished"] is True
-    assert data["page"]["publishedAt"] == datetime.now(pytz.utc).isoformat()
+    assert (
+        data["page"]["publishedAt"]
+        == datetime.datetime.now(tz=datetime.UTC).isoformat()
+    )
 
 
 def test_update_page_publication_date(
@@ -964,7 +1072,9 @@ def test_update_page_publication_date(
         "page_type": page_type,
     }
     page = Page.objects.create(**data)
-    published_at = datetime.now(pytz.utc).replace(microsecond=0) + timedelta(days=5)
+    published_at = datetime.datetime.now(tz=datetime.UTC).replace(
+        microsecond=0
+    ) + datetime.timedelta(days=5)
     page_id = graphene.Node.to_global_id("Page", page.id)
     variables = {
         "id": page_id,
@@ -1053,6 +1163,14 @@ UPDATE_PAGE_ATTRIBUTES_MUTATION = """
                         id
                         slug
                         name
+                        reference
+                        date
+                        dateTime
+                        plainText
+                        file {
+                            url
+                            contentType
+                        }
                     }
                 }
             }
@@ -1197,3 +1315,101 @@ def test_paginate_pages(user_api_client, page, page_type):
     content = get_graphql_content(response)
     pages_data = content["data"]["pages"]
     assert len(pages_data["edges"]) == 2
+
+
+def test_update_page_with_single_reference_attributes(
+    staff_api_client,
+    permission_manage_pages,
+    page_list,
+    page_type_page_single_reference_attribute,
+    page_type_product_single_reference_attribute,
+    page_type_variant_single_reference_attribute,
+    page_type_category_single_reference_attribute,
+    page_type_collection_single_reference_attribute,
+    collection,
+    product,
+    categories,
+    product_variant_list,
+):
+    # given
+    page = page_list[0]
+    page.page_type.page_attributes.clear()
+    page.page_type.page_attributes.add(
+        page_type_page_single_reference_attribute,
+        page_type_product_single_reference_attribute,
+        page_type_variant_single_reference_attribute,
+        page_type_category_single_reference_attribute,
+        page_type_collection_single_reference_attribute,
+    )
+    page_ref = page_list[1]
+    references = [
+        (page_ref, page_type_page_single_reference_attribute, page_ref.title),
+        (product, page_type_product_single_reference_attribute, product.name),
+        (
+            product_variant_list[0],
+            page_type_variant_single_reference_attribute,
+            f"{product_variant_list[0].product.name}: {product_variant_list[0].name}",
+        ),
+        (
+            categories[0],
+            page_type_category_single_reference_attribute,
+            categories[0].name,
+        ),
+        (
+            collection,
+            page_type_collection_single_reference_attribute,
+            collection.name,
+        ),
+    ]
+    attributes = [
+        {
+            "id": graphene.Node.to_global_id("Attribute", attr.pk),
+            "reference": graphene.Node.to_global_id(attr.entity_type, ref.pk),
+        }
+        for ref, attr, _name in references
+    ]
+
+    variables = {
+        "id": graphene.Node.to_global_id("Page", page.pk),
+        "input": {
+            "attributes": attributes,
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        UPDATE_PAGE_ATTRIBUTES_MUTATION,
+        variables,
+        permissions=[permission_manage_pages],
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["pageUpdate"]
+    errors = data["errors"]
+
+    assert not errors
+    attributes_data = data["page"]["attributes"]
+    assert len(attributes_data) == len(references)
+    expected_attributes_data = [
+        {
+            "attribute": {
+                "slug": attr.slug,
+            },
+            "values": [
+                {
+                    "id": ANY,
+                    "slug": f"{page.id}_{ref.id}",
+                    "date": None,
+                    "dateTime": None,
+                    "name": name,
+                    "file": None,
+                    "plainText": None,
+                    "reference": graphene.Node.to_global_id(attr.entity_type, ref.pk),
+                }
+            ],
+        }
+        for ref, attr, name in references
+    ]
+    for attr_data in attributes_data:
+        assert attr_data in expected_attributes_data

@@ -1,7 +1,8 @@
 import os
 import secrets
 from io import BytesIO
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
+from urllib.parse import urlparse
 
 import graphene
 import magic
@@ -28,7 +29,7 @@ def get_image_or_proxy_url(
     instance_id: str,
     object_type: str,
     size: int,
-    format: Optional[str],
+    format: str | None,
 ):
     """Return the thumbnail ULR if thumbnails is provided, otherwise the proxy url."""
     return (
@@ -39,7 +40,7 @@ def get_image_or_proxy_url(
 
 
 def prepare_image_proxy_url(
-    instance_pk: str, object_type: str, size: int, format: Optional[str]
+    instance_pk: str, object_type: str, size: int, format: str | None
 ):
     instance_id = graphene.Node.to_global_id(object_type, instance_pk)
     kwargs = {"instance_id": instance_id, "size": size}
@@ -48,7 +49,7 @@ def prepare_image_proxy_url(
     return reverse("thumbnail", kwargs=kwargs)
 
 
-def get_thumbnail_size(size: Optional[int]) -> int:
+def get_thumbnail_size(size: int | None) -> int:
     """Return the closest size to the given one of the available sizes."""
     if size is None:
         requested_size = DEFAULT_THUMBNAIL_SIZE
@@ -60,7 +61,7 @@ def get_thumbnail_size(size: Optional[int]) -> int:
     return min(THUMBNAIL_SIZES, key=lambda x: abs(x - requested_size))
 
 
-def get_thumbnail_format(format: Optional[str]) -> Optional[str]:
+def get_thumbnail_format(format: str | None) -> str | None:
     """Return the thumbnail format if it's supported, otherwise None."""
     if format is None:
         return None
@@ -72,16 +73,14 @@ def get_thumbnail_format(format: Optional[str]) -> Optional[str]:
     return format
 
 
-def get_icon_thumbnail_format(format: Optional[str]) -> Optional[str]:
+def get_icon_thumbnail_format(format: str | None) -> str | None:
     """Return the icon thumbnail format if it's supported, otherwise None."""
     if not format or format.lower() == IconThumbnailFormat.ORIGINAL:
         return None
     return format
 
 
-def prepare_thumbnail_file_name(
-    file_name: str, size: int, format: Optional[str]
-) -> str:
+def prepare_thumbnail_file_name(file_name: str, size: int, format: str | None) -> str:
     file_path, file_ext = file_name.rsplit(".", 1)
     file_ext = format or file_ext
     return file_path + f"_thumbnail_{size}." + file_ext
@@ -106,9 +105,9 @@ class ProcessedImage:
 
     def __init__(
         self,
-        image_source: Union[str, File],
+        image_source: str | File,
         size: int,
-        format: Optional[str] = None,
+        format: str | None = None,
         storage=default_storage,
     ):
         self.image_source = image_source
@@ -187,11 +186,11 @@ class ProcessedImage:
                 exif = dict(exif_datadict.items())
                 orientation = exif.get(self.EXIF_ORIENTATION_KEY, None)
                 if orientation == 3:
-                    image = image.transpose(Image.ROTATE_180)
+                    image = image.transpose(Image.Transpose.ROTATE_180)
                 elif orientation == 6:
-                    image = image.transpose(Image.ROTATE_270)
+                    image = image.transpose(Image.Transpose.ROTATE_270)
                 elif orientation == 8:
-                    image = image.transpose(Image.ROTATE_90)
+                    image = image.transpose(Image.Transpose.ROTATE_90)
 
         # Ensure any embedded ICC profile is preserved
         save_kwargs["icc_profile"] = image.info.get("icc_profile")
@@ -256,7 +255,7 @@ class ProcessedIconImage(ProcessedImage):
 
 def get_filename_from_url(url: str) -> str:
     """Prepare a unique filename for file from the URL to avoid overwriting."""
-    file_name = os.path.basename(url)
+    file_name = os.path.basename(urlparse(url).path)
     name, format = os.path.splitext(file_name)
     name = name[:FILE_NAME_MAX_LENGTH]
     hash = secrets.token_hex(nbytes=4)

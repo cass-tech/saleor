@@ -1,7 +1,8 @@
 import json
 import logging
+from functools import cache
 from os.path import exists, join
-from typing import Optional, Union, cast
+from typing import cast
 
 import jwt
 from authlib.jose import JsonWebKey
@@ -19,7 +20,7 @@ from .utils import build_absolute_uri, get_domain
 
 logger = logging.getLogger(__name__)
 
-PUBLIC_KEY: Optional[rsa.RSAPublicKey] = None
+PUBLIC_KEY: rsa.RSAPublicKey | None = None
 
 
 class JWTManagerBase:
@@ -68,12 +69,14 @@ class JWTManagerBase:
 
 class JWTManager(JWTManagerBase):
     KEY_FILE_FOR_DEBUG = ".jwt_key.pem"
+    _ALG = "RS256"
 
     @classmethod
     def get_domain(cls) -> str:
         return get_domain()
 
     @classmethod
+    @cache
     def get_private_key(cls) -> rsa.RSAPrivateKey:
         pem = settings.RSA_PRIVATE_KEY
         if not pem:
@@ -85,11 +88,11 @@ class JWTManager(JWTManagerBase):
         return cls._get_private_key(pem)
 
     @classmethod
-    def _get_private_key(cls, pem: Union[str, bytes]) -> rsa.RSAPrivateKey:
+    def _get_private_key(cls, pem: str | bytes) -> rsa.RSAPrivateKey:
         if isinstance(pem, str):
             pem = pem.encode("utf-8")
 
-        password: Union[str, bytes, None] = settings.RSA_PRIVATE_PASSWORD
+        password: str | bytes | None = settings.RSA_PRIVATE_PASSWORD
         if isinstance(password, str):
             password = password.encode("utf-8")
         return cast(
@@ -130,6 +133,7 @@ class JWTManager(JWTManagerBase):
         return private_key
 
     @classmethod
+    @cache
     def get_public_key(cls) -> rsa.RSAPublicKey:
         global PUBLIC_KEY
 
@@ -141,7 +145,7 @@ class JWTManager(JWTManagerBase):
     @classmethod
     def get_jwks(cls) -> dict:
         jwk_dict = json.loads(RSAAlgorithm.to_jwk(cls.get_public_key()))
-        jwk_dict.update({"use": "sig", "kid": cls.get_key_id()})
+        jwk_dict.update({"use": "sig", "kid": cls.get_key_id(), "alg": cls._ALG})
         return {"keys": [jwk_dict]}
 
     @classmethod
@@ -162,8 +166,8 @@ class JWTManager(JWTManagerBase):
     def encode(cls, payload):
         return api_jwt.encode(
             payload,
-            cls.get_private_key(),  # type: ignore[arg-type] # key is typed as str for all algos # noqa: E501
-            algorithm="RS256",
+            cls.get_private_key(),
+            algorithm=cls._ALG,
             headers={"kid": cls.get_key_id()},
         )
 
@@ -171,8 +175,8 @@ class JWTManager(JWTManagerBase):
     def jws_encode(cls, payload: bytes, is_payload_detached: bool = True) -> str:
         return api_jws.encode(
             payload,
-            key=cls.get_private_key(),  # type: ignore[arg-type] # key is typed as str for all algos # noqa: E501
-            algorithm="RS256",
+            key=cls.get_private_key(),
+            algorithm=cls._ALG,
             headers={"kid": cls.get_key_id(), "crit": ["b64"]},
             is_payload_detached=is_payload_detached,
         )
@@ -182,11 +186,11 @@ class JWTManager(JWTManagerBase):
         # `verify_aud` set to false as we decode our own tokens
         # we can have `aud` defined for app or custom.
         headers = jwt.get_unverified_header(token)
-        if headers.get("alg") == "RS256":
+        if headers.get("alg") == cls._ALG:
             return jwt.decode(
                 token,
-                cls.get_public_key(),  # type: ignore[arg-type] # key is typed as str for all algos # noqa: E501
-                algorithms=["RS256"],
+                cls.get_public_key(),
+                algorithms=[cls._ALG],
                 options={"verify_exp": verify_expiration, "verify_aud": verify_aud},
             )
         return jwt.decode(
@@ -204,22 +208,26 @@ class JWTManager(JWTManagerBase):
                     "Variable RSA_PRIVATE_KEY is not provided. "
                     "It is required for running in not DEBUG mode."
                 )
-            else:
-                msg = (
-                    "RSA_PRIVATE_KEY is missing. Using temporary key for local "
-                    "development with DEBUG mode."
-                )
-                logger.warning(color_style().WARNING(msg))
+            msg = (
+                "RSA_PRIVATE_KEY is missing. Using temporary key for local "
+                "development with DEBUG mode."
+            )
+            logger.warning(color_style().WARNING(msg))
 
+        cls.get_private_key.cache_clear()
+        cls.get_public_key.cache_clear()
         try:
             cls.get_private_key()
         except Exception as e:
-            raise ImproperlyConfigured(f"Unable to load provided PEM private key. {e}")
+            raise ImproperlyConfigured(
+                f"Unable to load provided PEM private key. {e}"
+            ) from e
 
     @classmethod
     def get_issuer(cls) -> str:
         return build_absolute_uri(reverse("api"), domain=cls.get_domain())
 
 
+@cache
 def get_jwt_manager() -> JWTManagerBase:
     return import_string(settings.JWT_MANAGER_PATH)

@@ -6,6 +6,7 @@ import graphene
 from django.core.exceptions import ValidationError
 
 from .....app.models import App
+from .....core.prices import quantize_price
 from .....order.models import Order
 from .....payment import PaymentError, TransactionAction, TransactionEventType
 from .....payment.error_codes import TransactionRequestActionErrorCode
@@ -18,7 +19,6 @@ from .....permission.enums import PaymentPermissions
 from ....app.dataloaders import get_app_promise
 from ....checkout.types import Checkout
 from ....core import ResolveInfo
-from ....core.descriptions import ADDED_IN_34, ADDED_IN_314, PREVIEW_FEATURE
 from ....core.doc_category import DOC_CATEGORY_PAYMENTS
 from ....core.mutations import BaseMutation
 from ....core.scalars import UUID, PositiveDecimal
@@ -46,8 +46,7 @@ class TransactionRequestAction(BaseMutation):
         token = UUID(
             description=(
                 "The token of the transaction. One of field id or token is required."
-            )
-            + ADDED_IN_314,
+            ),
             required=False,
         )
         action_type = graphene.Argument(
@@ -57,15 +56,14 @@ class TransactionRequestAction(BaseMutation):
         )
         amount = PositiveDecimal(
             description=(
-                "Transaction request amount. If empty for refund or capture, maximal "
-                "possible amount will be used."
-            )
+                "Transaction request amount. If empty, maximal possible "
+                "amount will be used."
+            ),
+            required=False,
         )
 
     class Meta:
-        description = (
-            "Request an action for payment transaction." + ADDED_IN_34 + PREVIEW_FEATURE
-        )
+        description = "Request an action for payment transaction."
         doc_category = DOC_CATEGORY_PAYMENTS
         error_type_class = common_types.TransactionRequestActionError
         permissions = (PaymentPermissions.HANDLE_PAYMENTS,)
@@ -75,18 +73,20 @@ class TransactionRequestAction(BaseMutation):
         cls,
         action,
         action_kwargs,
-        action_value: Optional[Decimal],
+        action_value: Decimal | None,
         user: Optional["User"],
-        app: Optional[App],
+        app: App | None,
     ):
         if action == TransactionAction.CANCEL:
             transaction = action_kwargs["transaction"]
+            action_value = action_value or transaction.authorized_value
+            action_value = min(action_value, transaction.authorized_value)
             request_event = cls.create_transaction_event_requested(
-                transaction, 0, action, user=user, app=app
+                transaction, action_value, action, user=user, app=app
             )
             request_cancelation_action(
                 **action_kwargs,
-                cancel_value=None,
+                cancel_value=action_value,
                 request_event=request_event,
                 action=action,
             )
@@ -154,11 +154,17 @@ class TransactionRequestAction(BaseMutation):
         else:
             checkout = cast(Checkout, transaction.checkout)
             channel = checkout.channel
+
         cls.check_channel_permissions(info, [channel.id])
+
         channel_slug = channel.slug
         user = info.context.user
         app = get_app_promise(info.context).get()
         manager = get_plugin_manager_promise(info.context).get()
+
+        if action_value is not None:
+            action_value = quantize_price(action_value, transaction.currency)
+
         action_kwargs = {
             "channel_slug": channel_slug,
             "user": user,
@@ -174,5 +180,5 @@ class TransactionRequestAction(BaseMutation):
         except PaymentError as e:
             error_enum = TransactionRequestActionErrorCode
             code = error_enum.MISSING_TRANSACTION_ACTION_REQUEST_WEBHOOK.value
-            raise ValidationError(str(e), code=code)
+            raise ValidationError(str(e), code=code) from e
         return TransactionRequestAction(transaction=transaction)

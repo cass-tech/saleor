@@ -1,7 +1,6 @@
 """Checkout-related utility functions."""
 
 from collections.abc import Iterable
-from typing import Optional
 
 from django.conf import settings
 from django.db.models import Exists, Q
@@ -54,7 +53,7 @@ def _update_authorize_status(
         checkout_has_lines and checkout_total_gross <= zero_money_amount
     )
 
-    if total_covered <= zero_money_amount and checkout_with_only_zero_price_lines:
+    if checkout_with_only_zero_price_lines:
         checkout.authorize_status = CheckoutAuthorizeStatus.FULL
     elif total_covered == zero_money_amount:
         checkout.authorize_status = CheckoutAuthorizeStatus.NONE
@@ -84,7 +83,7 @@ def update_checkout_payment_statuses(
     checkout: Checkout,
     checkout_total_gross: Money,
     checkout_has_lines: bool,
-    checkout_transactions: Optional[Iterable["TransactionItem"]] = None,
+    checkout_transactions: Iterable["TransactionItem"] | None = None,
     save: bool = True,
     database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
 ):

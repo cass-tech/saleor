@@ -1,6 +1,5 @@
 from collections import defaultdict
 
-from django.db.models import Exists, OuterRef
 from promise import Promise
 
 from ....attribute.models import (
@@ -24,8 +23,10 @@ class BaseProductAttributesByProductTypeIdLoader(DataLoader):
     model_name = None
     extra_fields = None
 
-    def get_queryset(self):
-        raise NotImplementedError()
+    @staticmethod
+    def filter_attributes(attributes: list[Attribute]) -> list[Attribute]:
+        """Filter attributes based on custom logic, if needed."""
+        return attributes
 
     def batch_load(self, keys):
         if not self.model_name:
@@ -33,32 +34,32 @@ class BaseProductAttributesByProductTypeIdLoader(DataLoader):
         if not self.extra_fields:
             self.extra_fields = []
 
-        qs = self.get_queryset()
-        product_type_attribute_pairs = qs.filter(product_type_id__in=keys).values_list(
-            "product_type_id", "attribute_id", *self.extra_fields
+        product_type_attribute_pairs = (
+            self.model_name.objects.using(self.database_connection_name)
+            .filter(product_type_id__in=keys)
+            .values_list("product_type_id", "attribute_id", *self.extra_fields)
         )
 
-        product_type_to_attributes_map = defaultdict(list)
-        for product_type_id, attr_id, *extra_fields in product_type_attribute_pairs:
-            product_type_to_attributes_map[product_type_id].append(
-                (attr_id, *extra_fields)
-            )
-
         def map_attributes(attributes):
+            attributes = self.filter_attributes(attributes)
             attributes_map = {attr.id: attr for attr in attributes}
+
+            product_type_to_attributes_map = defaultdict(list)
+            for product_type_id, attr_id, *extra_fields in product_type_attribute_pairs:
+                if attr_id in attributes_map:
+                    # Only add attributes that are in the attributes_map to ensure
+                    # that filtered attributes are respected.
+                    product_type_to_attributes_map[product_type_id].append(
+                        (attributes_map[attr_id], *extra_fields)
+                    )
             return [
-                [
-                    (attributes_map[attr_id], *extra_fields)
-                    for attr_id, *extra_fields in product_type_to_attributes_map[
-                        product_type_id
-                    ]
-                ]
+                product_type_to_attributes_map.get(product_type_id, [])
                 for product_type_id in keys
             ]
 
         return (
             AttributesByAttributeId(self.context)
-            .load_many(set(attr_id for _, attr_id, *_ in product_type_attribute_pairs))
+            .load_many({attr_id for _, attr_id, *_ in product_type_attribute_pairs})
             .then(map_attributes)
         )
 
@@ -69,9 +70,6 @@ class ProductAttributesAllByProductTypeIdLoader(
     context_key = "product_attributes_all_by_producttype"
     model_name = AttributeProduct
 
-    def get_queryset(self):
-        return self.model_name.objects.using(self.database_connection_name).all()
-
 
 class ProductAttributesVisibleInStorefrontByProductTypeIdLoader(
     BaseProductAttributesByProductTypeIdLoader
@@ -79,14 +77,9 @@ class ProductAttributesVisibleInStorefrontByProductTypeIdLoader(
     context_key = "product_attributes_visible_in_storefront_by_producttype"
     model_name = AttributeProduct
 
-    def get_queryset(self):
-        return self.model_name.objects.using(self.database_connection_name).filter(
-            Exists(
-                Attribute.objects.filter(
-                    pk=OuterRef("attribute_id"), visible_in_storefront=True
-                ),
-            ),
-        )
+    @staticmethod
+    def filter_attributes(attributes: list[Attribute]) -> list[Attribute]:
+        return [attr for attr in attributes if attr and attr.visible_in_storefront]
 
 
 class VariantAttributesAllByProductTypeIdLoader(
@@ -98,9 +91,6 @@ class VariantAttributesAllByProductTypeIdLoader(
     model_name = AttributeVariant
     extra_fields = ["variant_selection"]
 
-    def get_queryset(self):
-        return self.model_name.objects.using(self.database_connection_name).all()
-
 
 class VariantAttributesVisibleInStorefrontByProductTypeIdLoader(
     BaseProductAttributesByProductTypeIdLoader
@@ -111,14 +101,9 @@ class VariantAttributesVisibleInStorefrontByProductTypeIdLoader(
     model_name = AttributeVariant
     extra_fields = ["variant_selection"]
 
-    def get_queryset(self):
-        return self.model_name.objects.using(self.database_connection_name).filter(
-            Exists(
-                Attribute.objects.filter(
-                    pk=OuterRef("attribute_id"), visible_in_storefront=True
-                ),
-            ),
-        )
+    @staticmethod
+    def filter_attributes(attributes: list[Attribute]) -> list[Attribute]:
+        return [attr for attr in attributes if attr and attr.visible_in_storefront]
 
 
 class AttributeVariantsByProductTypeIdLoader(DataLoader):
@@ -138,7 +123,7 @@ class AttributeVariantsByProductTypeIdLoader(DataLoader):
             )
         attribute_variants = qs.filter(product_type_id__in=keys)
         producttype_to_attributevariants = defaultdict(list)
-        for attribute_variant in attribute_variants.iterator():
+        for attribute_variant in attribute_variants.iterator(chunk_size=1000):
             producttype_to_attributevariants[attribute_variant.product_type_id].append(
                 attribute_variant
             )
@@ -166,7 +151,9 @@ class AssignedVariantAttributesByProductVariantId(DataLoader):
             "assignment__attribute"
         )
         variant_attributes = defaultdict(list)
-        for assigned_variant_attribute in assigned_variant_attributes.iterator():
+        for assigned_variant_attribute in assigned_variant_attributes.iterator(
+            chunk_size=1000
+        ):
             variant_attributes[assigned_variant_attribute.variant_id].append(
                 assigned_variant_attribute
             )
@@ -180,12 +167,12 @@ class AttributeValuesByAssignedVariantAttributeIdLoader(DataLoader):
         attribute_values = list(
             AssignedVariantAttributeValue.objects.using(self.database_connection_name)
             .filter(assignment_id__in=keys)
-            .iterator()
+            .iterator(chunk_size=1000)
         )
         value_ids = [a.value_id for a in attribute_values]
 
         def map_assignment_to_values(values):
-            value_map = dict(zip(value_ids, values))
+            value_map = dict(zip(value_ids, values, strict=False))
             assigned_variant_map = defaultdict(list)
             for attribute_value in attribute_values:
                 assigned_variant_map[attribute_value.assignment_id].append(
@@ -211,7 +198,7 @@ class BaseAttributeValuesByProductIdLoader(DataLoader):
         attribute_values = list(
             AssignedProductAttributeValue.objects.using(self.database_connection_name)
             .filter(product_id__in=keys)
-            .iterator()
+            .iterator(chunk_size=1000)
         )
         value_ids = [a.value_id for a in attribute_values]
 
@@ -222,9 +209,9 @@ class BaseAttributeValuesByProductIdLoader(DataLoader):
             def with_attributes_and_values(result):
                 attribute_products, values = result
                 product_type_attrubutes = dict(
-                    zip(product_type_ids, attribute_products)
+                    zip(product_type_ids, attribute_products, strict=False)
                 )
-                values_by_id_map = dict(zip(value_ids, values))
+                values_by_id_map = dict(zip(value_ids, values, strict=False))
                 assigned_product_map = defaultdict(list)
 
                 for product in products:
@@ -301,14 +288,14 @@ class SelectedAttributesByProductVariantIdLoader(DataLoader):
             assigned_variant_attribute_ids = [
                 a.id for attrs in variant_attributes for a in attrs
             ]
-            variant_attributes = dict(zip(keys, variant_attributes))
+            variant_attributes = dict(zip(keys, variant_attributes, strict=False))
 
             def with_products_and_attribute_values(results):
                 products, attribute_values = results
                 product_type_ids = list({p.product_type_id for p in products})
-                products = dict(zip(product_ids, products))
+                products = dict(zip(product_ids, products, strict=False))
                 attribute_values = dict(
-                    zip(assigned_variant_attribute_ids, attribute_values)
+                    zip(assigned_variant_attribute_ids, attribute_values, strict=False)
                 )
 
                 def with_attribute_products(attribute_products):
@@ -316,12 +303,18 @@ class SelectedAttributesByProductVariantIdLoader(DataLoader):
                         {ap.attribute_id for aps in attribute_products for ap in aps}
                     )
 
-                    attribute_products = dict(zip(product_type_ids, attribute_products))
+                    attribute_products = dict(
+                        zip(product_type_ids, attribute_products, strict=False)
+                    )
 
                     def with_attributes(attributes):
-                        id_to_attribute = dict(zip(attribute_ids, attributes))
+                        id_to_attribute = dict(
+                            zip(attribute_ids, attributes, strict=False)
+                        )
                         selected_attributes_map = defaultdict(list)
-                        for key, product_variant in zip(keys, product_variants):
+                        for key, product_variant in zip(
+                            keys, product_variants, strict=False
+                        ):
                             product = products[product_variant.product_id]
                             assigned_producttype_attributes = attribute_products[
                                 product.product_type_id
