@@ -5,11 +5,12 @@ All notable, unreleased changes to this project will be documented in this file.
 # 3.22.0 [Unreleased]
 
 ### Breaking changes
-- Increased query cost for attribute-related operations due to the addition of `AttributeValue.referencedObject`.
+- The following changes were implemented to orders with a zero total amount:
+  - No manual charge (`Transaction` or `Payment`) object will be created.
+  - The `OrderEvents.ORDER_MARKED_AS_PAID` event will no longer be emitted.
+- Logic associated with `WebhookEventAsyncType.CHECKOUT_FULLY_PAID` event will no longer be triggered when creating a transaction event from webhook response for checkouts with having total gross being 0. At the point of creating the transaction event checkout is already considered fully paid.
 
 ### GraphQL API
-
-- Added support for filtering products by attribute value names. The `AttributeInput` now includes a `valueNames` field, enabling filtering by the names of attribute values, in addition to the existing filtering by value slugs.
 - You can now filter and search orders using the new `where` and `search` fields on the `pages` query.
   - Use `where` to define complex conditions with `AND`/`OR` logic and operators like `eq`, `oneOf`, `range`.
   - Use `search` to perform full-text search across relevant fields.
@@ -32,6 +33,7 @@ All notable, unreleased changes to this project will be documented in this file.
     - Filter by associated payment method name and type.
     - Filter by associated billing and shipping address phone number and country code.
     - Filter by associated transactionItems metadata.
+    - Filter by warehouse used to fulfill the order.
 - You can now filter and search orders using the new `where` and `search` fields on the `orders` query.
   - Use `where` to define complex conditions with `AND`/`OR` logic and operators like `eq`, `oneOf`, `range`.
   - Use `search` to perform full-text search across relevant fields.
@@ -81,13 +83,16 @@ All notable, unreleased changes to this project will be documented in this file.
   - `collection.products`
   - `pageType.availableAttributes`
 - Extend `AttributeEntityType` with `CATEGORY` and `COLLECTION`. You can now assign category and collection as a attribute reference.
-- Attribute values now expose the `referencedObject`, allowing for easier access to the linked entity.
 - You can now filter and search attribute choices using the new `where` and `search` fields on the `attribute.choices` query.
 - Filtering products by `category` now also includes subcategories. The filter will return products that belong to the specified categories as well as their subcategories.
 - Deprecated `Transaction.gatewayResponse` field. Please migrate to Transaction API and Apps.
-- Extend the `Attribute` type with a `values` field, allowing you to retrieve all values assigned to a specific attribute.
 - Add new `single-reference` attribute. You can now create a reference attribute that points to only one object (unlike the existing `reference` type, which supports multiple references).
 Like `reference`, the `single-reference` type can target entities defined in the `AttributeEntityTypeEnum`.
+- Extended support for filtering `products` by associated attributes
+  - Attribute slug is now optional when filtering by attribute values
+  - Added support for filtering by associated reference objects (e.g., `products`, `pages`, `variants`)
+- Added `fractionalAmount` and `fractionDigits` fields to the `Money` type. These fields allow monetary values to be represented as a pair of integers, which is often required when integrating with payment service providers.
+- Add support for filtering `productVariants` by associated attributes
 
 ### Webhooks
 - Transaction webhooks responsible for processing payments can now return payment method details`, which will be associated with the corresponding transaction. See [docs](https://docs.saleor.io/developer/extending/webhooks/synchronous-events/transaction#response-4) to learn more.
@@ -126,15 +131,19 @@ Like `reference`, the `single-reference` type can target entities defined in the
 
 - Fixed bug in user email filtering to make it case-insensitive.
 
+- Checkouts having total gross amount equal to 0 will get their authorization statuses updated to `CheckoutAuthorizeStatus.FULL` upon fetching checkout data.
+
 ### Deprecations
 
 Following plugins are now marked as deprecated:
 
-- Braintree (`mirumee.payments.braintree`)
-- Razorpay (`mirumme.payments.razorpay`)
-- Sendgrid (`mirumee.notifications.sendgrid_email`)
-- Dummy (`mirumee.payments.dummy`)
-- DummyCreditCard (`mirumee.payments.dummy_credit_card`)
-- Avalara (`mirumee.taxes.avalara`)
+| Plugin Name | Plugin ID | Possible replacements |
+|-------------|-----------|-------------|
+| Braintree | `mirumee.payments.braintree` | [JusPay Hyperswitch App](https://docs.hyperswitch.io/explore-hyperswitch/e-commerce-platform-plugins/saleor-app) or [Custom App](https://docs.saleor.io/developer/extending/apps/overview) |
+| Razorpay | `mirumee.payments.razorpay` | [JusPay Hyperswitch App](https://docs.hyperswitch.io/explore-hyperswitch/e-commerce-platform-plugins/saleor-app) or [Custom App](https://docs.saleor.io/developer/extending/apps/overview) |
+| Sendgrid | `mirumee.notifications.sendgrid_email` | [Saleor SMTP App](https://apps.saleor.io/apps/smtp) |
+| Dummy | `mirumee.payments.dummy` | [Saleor Dummy Payment App](https://github.com/saleor/dummy-payment-app) |
+| DummyCreditCard | `mirumee.payments.dummy_credit_card` | [Saleor Dummy Payment App](https://github.com/saleor/dummy-payment-app) |
+| Avalara | `mirumee.taxes.avalara` | [Saleor Avalara AvaTax App](https://apps.saleor.io/apps/avatax) |
 
-We plan to remove deprecated plugins in the future versions of Saleor. We recommend you use [Saleor apps](https://apps.saleor.io/) instead.
+We plan to remove deprecated plugins in the future versions of Saleor.
