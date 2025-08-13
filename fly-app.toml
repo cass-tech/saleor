@@ -1,25 +1,26 @@
-# fly.toml app configuration file generated for saleor on 2024-01-28T00:52:39+02:00
+# fly-app.toml app configuration file generated for saleor on 2024-01-28T00:52:39+02:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'saleor'
-primary_region = 'cdg'
+primary_region = 'jnb'
 console_command = '/code/manage.py shell'
 
 [build]
+  dockerfile = "docker/Dockerfile.fly"
 
 [deploy]
   release_command = 'python manage.py migrate --noinput'
 
 [processes]
-  app = "gunicorn --bind :8000 --workers 4 --worker-class saleor.asgi.gunicorn_worker.UvicornWorker saleor.asgi:application"
+  app = "gunicorn saleor.asgi:application --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 2 --graceful-timeout 30 --keep-alive 35 --max-requests 10000 --max-requests-jitter 50 --log-level info"
   worker = "python -m celery -A saleor --app=saleor.celeryconf:app worker --loglevel=info -B"
 
 [env]
   AWS_STORAGE_BUCKET_NAME = 'saleor'
   AWS_MEDIA_BUCKET_NAME = 'saleor'
-  AWS_S3_ENDPOINT_URL = 'https://saleor-minio-nginx.fly.dev'
+  AWS_S3_ENDPOINT_URL = 'https://fly.storage.tigris.dev'
   AWS_S3_USE_SSL = "True"
   AWS_QUERYSTRING_AUTH = "True"
   AWS_S3_FILE_OVERWRITE = "False"
