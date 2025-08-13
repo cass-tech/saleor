@@ -4,13 +4,13 @@ from collections.abc import Iterable
 from promise import Promise
 
 from ...attribute.models import AssignedPageAttributeValue, Attribute, AttributePage
-from ...page.models import Page, PageType
+from ...page.models import Page, PageType, PageMedia
 from ..attribute.dataloaders import (
     AttributesByAttributeId,
     AttributesBySlugLoader,
     AttributeValueByIdLoader,
 )
-from ..core.dataloaders import DataLoader
+from ..core.dataloaders import DataLoader, BaseThumbnailBySizeAndFormatLoader
 
 PageTypeIdAndAttributeSlug = tuple[int, str]
 
@@ -360,3 +360,20 @@ class SelectedAttributeVisibleInStorefrontPageIdAttributeSlugLoader(
         return AttributeValuesVisibleInStorefrontByPageIdAndAttributeSlugLoader(
             self.context
         ).load_many(page_ids)
+
+class MediaByPageIdLoader(DataLoader[int, list[PageMedia]]):
+    context_key = "media_by_page"
+
+    def batch_load(self, keys):
+        media = PageMedia.objects.using(self.database_connection_name).filter(
+            page_id__in=keys,
+        )
+        media_map = defaultdict(list)
+        for media_obj in media.iterator():
+            media_map[media_obj.page_id].append(media_obj)
+        return [media_map[page_id] for page_id in keys]
+
+
+class ThumbnailByPageMediaIdSizeAndFormatLoader(BaseThumbnailBySizeAndFormatLoader):
+    context_key = "thumbnail_by_pagemedia_size_and_format"
+    model_name = "page_media"

@@ -1,6 +1,5 @@
 import graphene
 
-from ...channel import ChannelContext
 from ...core import ResolveInfo
 from ...core.types import PageError
 from ...plugins.dataloaders import get_plugin_manager_promise

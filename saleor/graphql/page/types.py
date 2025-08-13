@@ -1,6 +1,11 @@
 import graphene
+from graphene import relay
 
+from .enums import PageMediaType
+from .sorters import PageMediaSortingInput
+from ..core.utils import from_global_id_or_error
 from ...attribute import models as attribute_models
+from ...core.utils import build_absolute_uri
 from ...page import models
 from ...permission.enums import PagePermissions, PageTypePermissions
 from ..attribute.filters import (
@@ -25,7 +30,7 @@ from ..core.doc_category import DOC_CATEGORY_PAGES
 from ..core.federation import federated_entity, resolve_federation_references
 from ..core.fields import FilterConnectionField, JSONString, PermissionsField
 from ..core.scalars import Date, DateTime
-from ..core.types import ModelObjectType, NonNullList
+from ..core.types import ModelObjectType, NonNullList, ThumbnailField
 from ..core.types.context import ChannelContextType
 from ..meta.types import ObjectWithMetadata
 from ..translations.fields import TranslationField
@@ -39,8 +44,11 @@ from .dataloaders import (
     SelectedAttributeAllByPageIdAttributeSlugLoader,
     SelectedAttributesAllByPageIdLoader,
     SelectedAttributesVisibleInStorefrontPageIdLoader,
-    SelectedAttributeVisibleInStorefrontPageIdAttributeSlugLoader,
+    SelectedAttributeVisibleInStorefrontPageIdAttributeSlugLoader, MediaByPageIdLoader,
+    ThumbnailByPageMediaIdSizeAndFormatLoader,
 )
+from ...thumbnail.utils import get_thumbnail_format, get_image_or_proxy_url, \
+    get_thumbnail_size
 
 
 @federated_entity("id")
@@ -191,6 +199,19 @@ class Page(ChannelContextType[models.Page]):
         required=True,
         description="List of attributes assigned to this page.",
     )
+    media_by_id = graphene.Field(
+        lambda: PageMedia,
+        id=graphene.Argument(graphene.ID, description="ID of a page media."),
+        description="Get a single page media by ID.",
+    )
+    media = NonNullList(
+        lambda: PageMedia,
+        sort_by=graphene.Argument(
+            PageMediaSortingInput, description=f"Sort media."
+        ),
+        description="List of media for the page.",
+    )
+    thumbnail = ThumbnailField(description="Thumbnail of the page media.")
 
     class Meta:
         default_resolver = ChannelContextType.resolver_with_context
@@ -293,6 +314,107 @@ class Page(ChannelContextType[models.Page]):
             .then(wrap_with_channel_context)
         )
 
+    @staticmethod
+    def resolve_media_by_id(root: models.Page, info, *, id):
+        _type, pk = from_global_id_or_error(id, PageMedia)
+        return (
+            root.media.using(get_database_connection_name(info.context))
+            .filter(pk=pk)
+            .first()
+        )
+
+    @staticmethod
+    def resolve_media(root: ChannelContext[models.Page], info, sort_by=None):
+        page = root.node
+        if sort_by is None:
+            sort_by = {
+                "field": ["sort_order"],
+                "direction": "",
+            }
+
+        def sort_media(media) -> list[PageMedia]:
+            reversed = sort_by["direction"] == "-"
+
+            # Nullable first,
+            # achieved by adding the number of nonnull fields as firt element of tuple
+            def key(x):
+                values_tuple = tuple(
+                    getattr(x, field)
+                    for field in sort_by["field"]
+                    if getattr(x, field) is not None
+                )
+                values_tuple = (len(values_tuple),) + values_tuple
+                return values_tuple
+
+            media_sorted = sorted(
+                media,
+                key=key,
+                reverse=reversed,
+            )
+            return media_sorted
+        return MediaByPageIdLoader(info.context).load(page.id).then(sort_media)
+
+class PageMedia(ModelObjectType[models.PageMedia]):
+    id = graphene.GlobalID(
+        required=True, description="The unique ID of the page media."
+    )
+    sort_order = graphene.Int(description="The sort order of the media.")
+    alt = graphene.String(required=True, description="The alt text of the media.")
+    type = PageMediaType(required=True, description="The type of the media.")
+    oembed_data = JSONString(required=True, description="The oEmbed data of the media.")
+    url = ThumbnailField(
+        graphene.String, required=True, description="The URL of the media."
+    )
+    page_id = graphene.ID(
+        description="Page id the media refers to."
+    )
+
+    class Meta:
+        description = "Represents a page media."
+        interfaces = [relay.Node, ObjectWithMetadata]
+        model = models.PageMedia
+
+    @staticmethod
+    def resolve_url(
+        root: models.PageMedia,
+        info,
+        *,
+        size: int = None,
+        format: str = None,
+    ):
+        if root.external_url:
+            return root.external_url
+
+        if not root.image:
+            return
+
+        if size == 0:
+            return build_absolute_uri(root.image.url)
+
+        format = get_thumbnail_format(format)
+        selected_size = get_thumbnail_size(size)
+
+        def _resolve_url(thumbnail):
+            url = get_image_or_proxy_url(
+                thumbnail, str(root.id), "PageMedia", selected_size, format
+            )
+            return build_absolute_uri(url)
+
+        return (
+            ThumbnailByPageMediaIdSizeAndFormatLoader(info.context)
+            .load((root.id, selected_size, format))
+            .then(_resolve_url)
+        )
+
+    @staticmethod
+    def __resolve_references(roots: list["PageMedia"], _info):
+        return resolve_federation_references(
+            PageMedia, roots, models.PageMedia.objects
+        )
+
+    @staticmethod
+    def resolve_page_id(root: models.PageMedia, info):
+        return graphene.Node.to_global_id("Page", root.page_id)
 
 class PageCountableConnection(CountableConnection):
     class Meta:

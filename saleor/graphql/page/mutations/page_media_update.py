@@ -6,7 +6,6 @@ from saleor.page.error_codes import PageErrorCode
 from saleor.permission.enums import PagePermissions
 from ..types import Page, PageMedia
 from ..utils import ALT_CHAR_LIMIT
-from ...channel import ChannelContext
 from ...core import ResolveInfo
 from ...core.doc_category import DOC_CATEGORY_PAGES
 from ...core.mutations import BaseMutation
