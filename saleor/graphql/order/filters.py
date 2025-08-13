@@ -1,10 +1,11 @@
+from collections.abc import Mapping
 from uuid import UUID
 
 import django_filters
 import graphene
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db.models import Exists, OuterRef, Q, Value
+from django.db.models import Exists, OuterRef, Q, QuerySet, Value
 from django.utils import timezone
 from graphql.error import GraphQLError
 
@@ -12,11 +13,12 @@ from ...core.postgres import FlatConcat
 from ...giftcard import GiftCardEvents
 from ...giftcard.models import GiftCardEvent
 from ...invoice.models import Invoice
-from ...order.models import Fulfillment, Order, OrderEvent, OrderLine
+from ...order.models import Fulfillment, FulfillmentLine, Order, OrderEvent, OrderLine
 from ...order.search import search_orders
 from ...payment import ChargeStatus, PaymentMethodType
 from ...payment.models import TransactionItem
 from ...product.models import ProductVariant
+from ...warehouse.models import Stock, Warehouse
 from ..account.filters import AddressFilterInput, filter_address
 from ..channel.filters import get_currency_from_filter_data
 from ..core.doc_category import DOC_CATEGORY_ORDERS
@@ -72,6 +74,12 @@ from .enums import (
     OrderEventsEnum,
     OrderStatusEnum,
     OrderStatusFilter,
+)
+
+LIST_INPUT_OBJECT_DESCRIPTION = (
+    " Each list item represents conditions that must be satisfied by a single "
+    "object. The filter matches orders that have related objects "
+    "meeting all specified groups of conditions."
 )
 
 
@@ -282,6 +290,41 @@ def filter_has_fulfillments(qs, value):
     return qs.filter(~Exists(fulfillments))
 
 
+def filter_fulfillments_by_warehouse_details(
+    value: Mapping[str, Mapping[str, list[str] | str]], qs: QuerySet[Fulfillment]
+) -> QuerySet[Fulfillment]:
+    if not value:
+        return qs.none()
+
+    warehouse_qs = None
+    if warehouse_id_filter := value.get("id"):
+        warehouse_qs = filter_where_by_id_field(
+            Warehouse.objects.using(qs.db), "id", warehouse_id_filter, "Warehouse"
+        )
+    if warehouse_slug_filter := value.get("slug"):
+        if warehouse_qs is None:
+            warehouse_qs = Warehouse.objects.using(qs.db)
+        warehouse_qs = filter_where_by_value_field(
+            warehouse_qs, "slug", warehouse_slug_filter
+        )
+    if warehouse_external_reference := value.get("external_reference"):
+        if warehouse_qs is None:
+            warehouse_qs = Warehouse.objects.using(qs.db)
+        warehouse_qs = filter_where_by_value_field(
+            warehouse_qs, "external_reference", warehouse_external_reference
+        )
+    if warehouse_qs is None:
+        return qs.none()
+
+    stocks_qs = Stock.objects.using(qs.db).filter(
+        Exists(warehouse_qs.filter(id=OuterRef("warehouse_id")))
+    )
+    fulfillment_lines_qs = FulfillmentLine.objects.using(qs.db).filter(
+        Exists(stocks_qs.filter(id=OuterRef("stock_id")))
+    )
+    return qs.filter(Exists(fulfillment_lines_qs.filter(fulfillment_id=OuterRef("id"))))
+
+
 def filter_fulfillments(qs, value):
     if not value:
         return qs.none()
@@ -294,8 +337,14 @@ def filter_fulfillments(qs, value):
                 Fulfillment.objects.using(qs.db), "status", status_value
             )
         if metadata_value := input_data.get("metadata"):
-            fulfillment_qs = filter_where_metadata(
-                fulfillment_qs or Fulfillment.objects.using(qs.db), None, metadata_value
+            if fulfillment_qs is None:
+                fulfillment_qs = Fulfillment.objects.using(qs.db)
+            fulfillment_qs = filter_where_metadata(fulfillment_qs, None, metadata_value)
+        if warehouse_value := input_data.get("warehouse"):
+            if fulfillment_qs is None:
+                fulfillment_qs = Fulfillment.objects.using(qs.db)
+            fulfillment_qs = filter_fulfillments_by_warehouse_details(
+                value=warehouse_value, qs=fulfillment_qs
             )
         if fulfillment_qs is not None:
             lookup &= Q(Exists(fulfillment_qs.filter(order_id=OuterRef("id"))))
@@ -424,11 +473,34 @@ class FulfillmentStatusEnumFilterInput(BaseInputObjectType):
         description = "Filter by fulfillment status."
 
 
+class FulfillmentWarehouseFilterInput(BaseInputObjectType):
+    id = GlobalIDFilterInput(
+        description="Filter fulfillments by warehouse ID.",
+        required=False,
+    )
+    slug = StringFilterInput(
+        description="Filter fulfillments by warehouse slug.",
+        required=False,
+    )
+    external_reference = StringFilterInput(
+        description="Filter fulfillments by warehouse external reference.",
+        required=False,
+    )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_ORDERS
+        description = "Filter input for fulfillment warehouses."
+
+
 class FulfillmentFilterInput(BaseInputObjectType):
     status = FulfillmentStatusEnumFilterInput(
         description="Filter by fulfillment status."
     )
     metadata = MetadataFilterInput(description="Filter by metadata fields.")
+    warehouse = FulfillmentWarehouseFilterInput(
+        description="Filter by fulfillment warehouse.",
+        required=False,
+    )
 
     class Meta:
         doc_category = DOC_CATEGORY_ORDERS
@@ -778,10 +850,8 @@ class OrderWhere(MetadataWhereBase):
         input_class=InvoiceFilterInput,
         method="filter_invoices",
         help_text=(
-            "Filter by invoice data associated with the order. "
-            "Each list item represents conditions that must be satisfied by a single "
-            "invoice. The filter matches orders that have related objects "
-            "meeting all specified groups of conditions."
+            "Filter by invoice data associated with the order."
+            + LIST_INPUT_OBJECT_DESCRIPTION
         ),
     )
     has_fulfillments = BooleanWhereFilter(
@@ -793,19 +863,15 @@ class OrderWhere(MetadataWhereBase):
         method="filter_fulfillments",
         help_text=(
             "Filter by fulfillment data associated with the order."
-            "Each list item specifies conditions that must be satisfied by a single "
-            "fulfillment. The filter matches orders that have related objects "
-            "meeting all specified groups of conditions."
+            + LIST_INPUT_OBJECT_DESCRIPTION
         ),
     )
     lines = ListObjectTypeWhereFilter(
         input_class=LinesFilterInput,
         method=filter_where_lines,
         help_text=(
-            "Filter by line items associated with the order. "
-            "Each list item specifies conditions that must be satisfied by a single "
-            "line. The filter matches orders that have related objects "
-            "meeting all specified groups of conditions."
+            "Filter by line items associated with the order."
+            + LIST_INPUT_OBJECT_DESCRIPTION
         ),
     )
     lines_count = OperationObjectTypeWhereFilter(
@@ -818,9 +884,7 @@ class OrderWhere(MetadataWhereBase):
         method=filter_where_transactions,
         help_text=(
             "Filter by transaction data associated with the order."
-            "Each list item specifies conditions that must be satisfied by a single "
-            "transaction. The filter matches orders that have related objects "
-            "meeting all specified groups of conditions."
+            + LIST_INPUT_OBJECT_DESCRIPTION
         ),
     )
     total_gross = ObjectTypeWhereFilter(
@@ -841,11 +905,7 @@ class OrderWhere(MetadataWhereBase):
     events = ListObjectTypeWhereFilter(
         input_class=OrderEventFilterInput,
         method=filter_where_events,
-        help_text=(
-            "Filter by order events. Each list item specifies conditions that must be "
-            "satisfied by a single event. The filter matches orders that have related "
-            "objects meeting all specified groups of conditions."
-        ),
+        help_text=("Filter by order events." + LIST_INPUT_OBJECT_DESCRIPTION),
     )
     billing_address = ObjectTypeWhereFilter(
         input_class=AddressFilterInput,
@@ -972,10 +1032,8 @@ class DraftOrderWhere(MetadataWhereBase):
         input_class=LinesFilterInput,
         method=filter_where_lines,
         help_text=(
-            "Filter by line items associated with the order. "
-            "Each list item specifies conditions that must be satisfied by a single "
-            "line. The filter matches orders that have related objects "
-            "meeting all specified groups of conditions."
+            "Filter by line items associated with the order."
+            + LIST_INPUT_OBJECT_DESCRIPTION
         ),
     )
     lines_count = OperationObjectTypeWhereFilter(
@@ -988,9 +1046,7 @@ class DraftOrderWhere(MetadataWhereBase):
         method=filter_where_transactions,
         help_text=(
             "Filter by transaction data associated with the order."
-            "Each list item specifies conditions that must be satisfied by a single "
-            "transaction. The filter matches orders that have related objects "
-            "meeting all specified groups of conditions."
+            + LIST_INPUT_OBJECT_DESCRIPTION
         ),
     )
     total_gross = ObjectTypeWhereFilter(
@@ -1011,11 +1067,7 @@ class DraftOrderWhere(MetadataWhereBase):
     events = ListObjectTypeWhereFilter(
         input_class=OrderEventFilterInput,
         method=filter_where_events,
-        help_text=(
-            "Filter by order events. Each list item specifies conditions that must be "
-            "satisfied by a single event. The filter matches orders that have related "
-            "objects meeting all specified groups of conditions."
-        ),
+        help_text=("Filter by order events." + LIST_INPUT_OBJECT_DESCRIPTION),
     )
     billing_address = ObjectTypeWhereFilter(
         input_class=AddressFilterInput,

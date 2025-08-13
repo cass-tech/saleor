@@ -21,6 +21,7 @@ from .....page.error_codes import PageErrorCode
 from .....page.models import Page
 from .....tests.utils import dummy_editorjs
 from .....webhook.event_types import WebhookEventAsyncType
+from ....core.utils import to_global_id_or_none
 from ....tests.utils import get_graphql_content
 
 UPDATE_PAGE_MUTATION = """
@@ -254,7 +255,7 @@ def test_update_page_only_title(staff_api_client, permission_manage_pages, page)
 
 
 def test_update_page_with_file_attribute_value(
-    staff_api_client, permission_manage_pages, page, page_file_attribute, site_settings
+    staff_api_client, permission_manage_pages, page, page_file_attribute
 ):
     # given
     query = UPDATE_PAGE_MUTATION
@@ -267,7 +268,7 @@ def test_update_page_with_file_attribute_value(
 
     page_id = graphene.Node.to_global_id("Page", page.id)
     file_name = "test.txt"
-    file_url = f"http://{site_settings.site.domain}{settings.MEDIA_URL}{file_name}"
+    file_url = f"https://example.com{settings.MEDIA_URL}{file_name}"
 
     variables = {
         "id": page_id,
@@ -304,7 +305,7 @@ def test_update_page_with_file_attribute_value(
 
 
 def test_update_page_with_file_attribute_new_value_is_not_created(
-    staff_api_client, permission_manage_pages, page, page_file_attribute, site_settings
+    staff_api_client, permission_manage_pages, page, page_file_attribute
 ):
     # given
     query = UPDATE_PAGE_MUTATION
@@ -320,8 +321,7 @@ def test_update_page_with_file_attribute_new_value_is_not_created(
     )
 
     page_id = graphene.Node.to_global_id("Page", page.id)
-    domain = site_settings.site.domain
-    file_url = f"http://{domain}{settings.MEDIA_URL}{existing_value.file_url}"
+    file_url = f"https://example.com{settings.MEDIA_URL}{existing_value.file_url}"
 
     variables = {
         "id": page_id,
@@ -757,9 +757,10 @@ def test_update_page_with_product_reference_attribute_existing_value(
     page_type = page.page_type
     page_type.page_attributes.add(page_type_product_reference_attribute)
 
+    expected_name = product.name
     attr_value = AttributeValue.objects.create(
         attribute=page_type_product_reference_attribute,
-        name=page.title,
+        name=expected_name,
         slug=f"{page.pk}_{product.pk}",
         reference_product=product,
     )
@@ -797,7 +798,7 @@ def test_update_page_with_product_reference_attribute_existing_value(
             {
                 "slug": attr_value.slug,
                 "file": None,
-                "name": page.title,
+                "name": expected_name,
                 "reference": reference,
                 "plainText": None,
             }
@@ -877,9 +878,10 @@ def test_update_page_with_variant_reference_attribute_existing_value(
     page_type = page.page_type
     page_type.page_attributes.add(page_type_variant_reference_attribute)
 
+    expected_name = f"{variant.product.name}: {variant.name}"
     attr_value = AttributeValue.objects.create(
         attribute=page_type_variant_reference_attribute,
-        name=page.title,
+        name=expected_name,
         slug=f"{page.pk}_{variant.pk}",
         reference_variant=variant,
     )
@@ -917,7 +919,7 @@ def test_update_page_with_variant_reference_attribute_existing_value(
             {
                 "slug": attr_value.slug,
                 "file": None,
-                "name": page.title,
+                "name": expected_name,
                 "reference": reference,
                 "plainText": None,
             }
@@ -1413,3 +1415,51 @@ def test_update_page_with_single_reference_attributes(
     ]
     for attr_data in attributes_data:
         assert attr_data in expected_attributes_data
+
+
+def test_update_page_with_numeric_attribute(
+    staff_api_client, permission_manage_pages, page, numeric_attribute
+):
+    # given
+    query = UPDATE_PAGE_MUTATION
+
+    page_type = page.page_type
+    page_type.page_attributes.all().delete()
+    page_type.page_attributes.add(numeric_attribute)
+
+    numeric_value = 33.12
+    numeric_name = str(numeric_value)
+
+    variables = {
+        "id": to_global_id_or_none(page),
+        "input": {
+            "attributes": [
+                {
+                    "id": to_global_id_or_none(numeric_attribute),
+                    "numeric": numeric_value,
+                }
+            ],
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_pages]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["pageUpdate"]
+
+    assert not data["errors"]
+    attributes = data["page"]["attributes"]
+    assert len(attributes) == 1
+    assert attributes[0]["attribute"]["slug"] == numeric_attribute.slug
+    assert len(attributes[0]["values"]) == 1
+    assert attributes[0]["values"][0]["slug"] == f"{page.pk}_{numeric_attribute.pk}"
+    assert attributes[0]["values"][0]["name"] == numeric_name
+
+    assert numeric_attribute.values.filter(
+        name=numeric_name,
+        numeric=numeric_value,
+    ).exists()

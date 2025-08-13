@@ -487,8 +487,12 @@ def numeric_attribute(db):
         filterable_in_dashboard=True,
         available_in_grid=True,
     )
-    AttributeValue.objects.create(attribute=attribute, name="9.5", slug="10_5")
-    AttributeValue.objects.create(attribute=attribute, name="15.2", slug="15_2")
+    AttributeValue.objects.create(
+        attribute=attribute, name="9.5", slug="10_5", numeric=9.5
+    )
+    AttributeValue.objects.create(
+        attribute=attribute, name="15.2", slug="15_2", numeric=15.2
+    )
     return attribute
 
 
@@ -503,8 +507,8 @@ def numeric_attribute_without_unit(db):
         filterable_in_dashboard=True,
         available_in_grid=True,
     )
-    AttributeValue.objects.create(attribute=attribute, name="9", slug="9")
-    AttributeValue.objects.create(attribute=attribute, name="15", slug="15")
+    AttributeValue.objects.create(attribute=attribute, name="9", slug="9", numeric=9)
+    AttributeValue.objects.create(attribute=attribute, name="15", slug="15", numeric=15)
     return attribute
 
 
@@ -564,7 +568,7 @@ def swatch_attribute(db):
         attribute=attribute,
         name="Logo",
         slug="logo",
-        file_url="http://mirumee.com/test_media/test_file.jpeg",
+        file_url="http://example.com/test_media/test_file.jpeg",
         content_type="image/jpeg",
     )
     return attribute

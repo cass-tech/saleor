@@ -99,7 +99,7 @@ def test_checkout_add_voucher_for_entire_order(api_client, checkout_with_item, v
     manager = get_plugins_manager(allow_replica=False)
     lines, _ = fetch_checkout_lines(checkout_with_item)
     checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
-    taxed_total = calculations.checkout_total(
+    taxed_total = calculations.calculate_checkout_total(
         manager=manager,
         checkout_info=checkout_info,
         lines=lines,
@@ -949,7 +949,7 @@ def test_checkout_get_total_with_gift_card(api_client, checkout_with_item, gift_
     manager = get_plugins_manager(allow_replica=False)
     lines, _ = fetch_checkout_lines(checkout_with_item)
     checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
-    taxed_total = calculations.checkout_total(
+    taxed_total = calculations.calculate_checkout_total(
         manager=manager,
         checkout_info=checkout_info,
         lines=lines,
@@ -1425,9 +1425,7 @@ def test_checkout_add_voucher_triggers_webhooks(
             "telemetry_context": ANY,
         },
         queue=settings.CHECKOUT_WEBHOOK_EVENTS_CELERY_QUEUE_NAME,
-        bind=True,
-        retry_backoff=10,
-        retry_kwargs={"max_retries": 5},
+        MessageGroupId="example.com:saleor.app.additional",
     )
 
     # confirm each sync webhook was called without saving event delivery
